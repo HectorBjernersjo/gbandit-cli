@@ -9,8 +9,6 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 
 use clap::{Parser, Subcommand, ValueEnum};
-use flate2::Compression;
-use flate2::write::GzEncoder;
 use reqwest::StatusCode;
 use reqwest::multipart::{Form, Part};
 use serde::{Deserialize, Serialize};
@@ -117,6 +115,23 @@ fn format_event_timestamp(created_at: &str) -> Option<String> {
     let local = parsed.with_timezone(&chrono::Local);
     let cs = local.timestamp_subsec_millis() / 10;
     Some(format!("{}.{cs:02}", local.format("%H:%M:%S")))
+}
+
+/// Reqwest client preconfigured with `Gbandit-Client` so backends can
+/// route per-version behaviour (e.g. archive format support).
+fn http_client() -> reqwest::Client {
+    let mut headers = reqwest::header::HeaderMap::new();
+    let value = format!("gbandit-cli/{}", env!("CARGO_PKG_VERSION"));
+    let header = reqwest::header::HeaderValue::from_str(&value)
+        .expect("CARGO_PKG_VERSION must be ASCII");
+    headers.insert(
+        reqwest::header::HeaderName::from_static("gbandit-client"),
+        header,
+    );
+    reqwest::Client::builder()
+        .default_headers(headers)
+        .build()
+        .expect("reqwest client must build with static headers")
 }
 
 #[derive(Subcommand)]
@@ -448,7 +463,7 @@ async fn main() -> Result<()> {
 }
 
 async fn login(printer: &Printer) -> Result<()> {
-    let client = reqwest::Client::new();
+    let client = http_client();
     let auth_origin = auth_origin();
     let response = client
         .post(format!("{auth_origin}/api/cli/login/start"))
@@ -548,7 +563,7 @@ async fn whoami(printer: &Printer) -> Result<()> {
 
 async fn sql(environment: &str, project: &str, query: &str) -> Result<()> {
     let auth = load_auth().await?;
-    let client = reqwest::Client::new();
+    let client = http_client();
     let response = client
         .post(format!(
             "{}/projects/{}/database/query?environment={}",
@@ -637,15 +652,15 @@ async fn migrate_down_to(
         .part(
             "bundle",
             Part::bytes(fs::read(archive.path())?)
-                .file_name("migrations.tar.gz".to_string())
-                .mime_str("application/gzip")?,
+                .file_name("migrations.tar.zst".to_string())
+                .mime_str("application/zstd")?,
         )
         .text("target_migration_version", target.to_string());
     if let Some(msg) = message {
         form = form.text("deploy_message", msg.to_string());
     }
 
-    let client = reqwest::Client::new();
+    let client = http_client();
     printer.progress("Uploading archive...");
     let response = client
         .post(format!(
@@ -693,8 +708,8 @@ async fn deploy(
     let mut form = Form::new().part(
         "bundle",
         Part::bytes(fs::read(archive.path())?)
-            .file_name("project.tar.gz".to_string())
-            .mime_str("application/gzip")?,
+            .file_name("project.tar.zst".to_string())
+            .mime_str("application/zstd")?,
     );
     if let Some(sha) = commit_sha.as_deref() {
         form = form.text("commit_sha", sha.to_string());
@@ -703,7 +718,7 @@ async fn deploy(
         form = form.text("deploy_message", msg.to_string());
     }
 
-    let client = reqwest::Client::new();
+    let client = http_client();
     printer.progress("Uploading archive...");
     let response = client
         .post(format!(
@@ -809,7 +824,7 @@ async fn logs(
 
 async fn backend_logs(environment: &str, project: &str) -> Result<()> {
     let auth = load_auth().await?;
-    let client = reqwest::Client::new();
+    let client = http_client();
     let response = client
         .get(format!(
             "{}/projects/{}/backend/logs?environment={}&tail_lines=2000",
@@ -843,7 +858,7 @@ struct FrontendLog {
 
 async fn frontend_logs(printer: &Printer, environment: &str, project: &str) -> Result<()> {
     let auth = load_auth().await?;
-    let client = reqwest::Client::new();
+    let client = http_client();
     let response = client
         .get(format!(
             "{}/projects/{}/frontend/logs?environment={}&limit=200",
@@ -904,7 +919,7 @@ async fn env_set(
     }
 
     let auth = load_auth().await?;
-    let client = reqwest::Client::new();
+    let client = http_client();
     let response = client
         .put(format!(
             "{}/projects/{}/env?environment={}",
@@ -924,7 +939,7 @@ async fn env_set(
 
 async fn env_list(printer: &Printer, environment: &str, project: &str) -> Result<()> {
     let auth = load_auth().await?;
-    let client = reqwest::Client::new();
+    let client = http_client();
     let response = client
         .get(format!(
             "{}/projects/{}/env?environment={}",
@@ -947,7 +962,7 @@ async fn env_list(printer: &Printer, environment: &str, project: &str) -> Result
 
 async fn env_delete(printer: &Printer, environment: &str, project: &str, key: &str) -> Result<()> {
     let auth = load_auth().await?;
-    let client = reqwest::Client::new();
+    let client = http_client();
     let response = client
         .delete(format!(
             "{}/projects/{}/env/{}?environment={}",
@@ -984,7 +999,7 @@ async fn project_delete(printer: &Printer, slug: &str, skip_prompt: bool) -> Res
     }
 
     let auth = load_auth().await?;
-    let client = reqwest::Client::new();
+    let client = http_client();
     let response = client
         .delete(format!("{}/projects/{slug}", auth.platform_api_origin))
         .bearer_auth(&auth.token)
@@ -1011,7 +1026,7 @@ async fn project_delete(printer: &Printer, slug: &str, skip_prompt: bool) -> Res
 
 async fn logout(printer: &Printer) -> Result<()> {
     let credentials = load_credentials()?;
-    let client = reqwest::Client::new();
+    let client = http_client();
     let response = client
         .post(format!("{}/api/cli/logout", credentials.auth_origin))
         .json(&serde_json::json!({
@@ -1034,7 +1049,7 @@ async fn logout(printer: &Printer) -> Result<()> {
 }
 
 async fn cli_access_token(credentials: &StoredCredentials) -> Result<String> {
-    let client = reqwest::Client::new();
+    let client = http_client();
     let response = client
         .post(format!("{}/api/cli/token", credentials.auth_origin))
         .json(&serde_json::json!({
@@ -1318,7 +1333,10 @@ fn build_component_archive(component: &str) -> Result<NamedTempFile> {
     let writer = temp
         .reopen()
         .context("failed to reopen temporary archive")?;
-    let encoder = GzEncoder::new(writer, Compression::default());
+    // zstd level 3 is the default and a strict win over gzip default (6):
+    // smaller output and several times faster on the projects we bundle.
+    let encoder = zstd::stream::Encoder::new(writer, 3)
+        .context("failed to initialise zstd encoder")?;
     let mut tar = Builder::new(encoder);
 
     // Rely on .gitignore (and .ignore) for skipping build outputs, dependency
@@ -1361,7 +1379,7 @@ fn build_component_archive(component: &str) -> Result<NamedTempFile> {
     }
 
     let encoder = tar.into_inner().context("failed to finalize tar archive")?;
-    let mut file = encoder.finish().context("failed to finish gzip archive")?;
+    let mut file = encoder.finish().context("failed to finish zstd archive")?;
     file.flush().context("failed to flush archive")?;
 
     Ok(temp)
