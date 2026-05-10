@@ -18,7 +18,7 @@ uname_s="$(uname -s)"
 uname_m="$(uname -m)"
 
 case "$uname_s" in
-    Linux)  os="unknown-linux-gnu" ;;
+    Linux)  os="unknown-linux-musl" ;;
     Darwin) os="apple-darwin" ;;
     *) echo "unsupported OS: $uname_s" >&2; exit 1 ;;
 esac
