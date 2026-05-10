@@ -1389,7 +1389,9 @@ fn load_credentials() -> Result<StoredCredentials> {
 
 fn credentials_path() -> Result<PathBuf> {
     let config_dir = dirs::config_dir().context("failed to determine config directory")?;
-    let filename = if cfg!(debug_assertions) {
+    // Keep dev and prod credentials in separate files so they don't clobber
+    // each other when a developer runs against both.
+    let filename = if auth_origin().contains("localhost") {
         "credentials-dev.json"
     } else {
         "credentials.json"
@@ -1398,23 +1400,13 @@ fn credentials_path() -> Result<PathBuf> {
 }
 
 fn auth_origin() -> String {
-    std::env::var("GBANDIT_AUTH_ORIGIN").unwrap_or_else(|_| {
-        if cfg!(debug_assertions) {
-            "http://auth.gbandit.localhost".into()
-        } else {
-            "https://auth.gbandit.com".into()
-        }
-    })
+    std::env::var("GBANDIT_AUTH_ORIGIN")
+        .unwrap_or_else(|_| "https://auth.gbandit.com".into())
 }
 
 fn platform_api_origin() -> String {
-    std::env::var("GBANDIT_PLATFORM_API_ORIGIN").unwrap_or_else(|_| {
-        if cfg!(debug_assertions) {
-            "http://platform.gbandit.localhost/api".into()
-        } else {
-            "https://platform.gbandit.com/api".into()
-        }
-    })
+    std::env::var("GBANDIT_PLATFORM_API_ORIGIN")
+        .unwrap_or_else(|_| "https://platform.gbandit.com/api".into())
 }
 
 fn resolve_project(cli_project: Option<String>) -> Result<String> {
