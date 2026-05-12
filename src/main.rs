@@ -9,10 +9,10 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 
 use clap::{Parser, Subcommand, ValueEnum};
+use ignore::WalkBuilder;
 use reqwest::StatusCode;
 use reqwest::multipart::{Form, Part};
 use serde::{Deserialize, Serialize};
-use ignore::WalkBuilder;
 use tar::Builder;
 use tempfile::NamedTempFile;
 
@@ -122,8 +122,8 @@ fn format_event_timestamp(created_at: &str) -> Option<String> {
 fn http_client() -> reqwest::Client {
     let mut headers = reqwest::header::HeaderMap::new();
     let value = format!("gbandit-cli/{}", env!("CARGO_PKG_VERSION"));
-    let header = reqwest::header::HeaderValue::from_str(&value)
-        .expect("CARGO_PKG_VERSION must be ASCII");
+    let header =
+        reqwest::header::HeaderValue::from_str(&value).expect("CARGO_PKG_VERSION must be ASCII");
     headers.insert(
         reqwest::header::HeaderName::from_static("gbandit-client"),
         header,
@@ -153,6 +153,10 @@ enum Command {
         /// Becomes the git commit message and the checkpoint label.
         #[arg(short, long)]
         message: Option<String>,
+        /// Overwrite the latest deployed code lineage when this checkout does
+        /// not contain it. Use after intentional history rewrites.
+        #[arg(long)]
+        overwrite: bool,
     },
     Logs {
         component: LogTarget,
@@ -255,10 +259,35 @@ impl std::fmt::Display for Environment {
 #[derive(Debug, Deserialize)]
 struct ProjectConfig {
     project: String,
+    #[serde(default)]
+    local_dev: LocalDevConfig,
+}
+
+impl ProjectConfig {
+    /// Local developer preference only. The Pi Agent runs without this config
+    /// and keeps the default auto-commit checkpoint behaviour.
+    fn auto_commit(&self) -> bool {
+        if std::env::var("GBANDIT_AGENT").is_ok() {
+            return true;
+        }
+        self.local_dev.auto_commit
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct LocalDevConfig {
     /// When true (default), `deploy` auto-commits a dirty tree so every
     /// deploy is a checkpoint. False: never touches git history.
     #[serde(default = "default_auto_commit")]
     auto_commit: bool,
+}
+
+impl Default for LocalDevConfig {
+    fn default() -> Self {
+        Self {
+            auto_commit: default_auto_commit(),
+        }
+    }
 }
 
 fn default_auto_commit() -> bool {
@@ -408,9 +437,17 @@ async fn main() -> Result<()> {
             environment,
             project,
             message,
+            overwrite,
         } => {
             let config = load_project_config(project)?;
-            deploy(&printer, environment.as_str(), &config, message.as_deref()).await
+            deploy(
+                &printer,
+                environment.as_str(),
+                &config,
+                message.as_deref(),
+                overwrite,
+            )
+            .await
         }
         Command::Logs {
             environment,
@@ -692,18 +729,26 @@ async fn deploy(
     environment: &str,
     config: &ProjectConfig,
     message: Option<&str>,
+    overwrite: bool,
 ) -> Result<()> {
+    if overwrite {
+        printer.progress(
+            "Overwriting deploy lineage if necessary. Use this only after an intentional git history rewrite.",
+        );
+    }
+
     let project = &config.project;
     let (commit_sha, deploy_message) =
-        prepare_checkpoint(printer, config.auto_commit, environment, message)?;
+        prepare_checkpoint(printer, config.auto_commit(), environment, message)?;
 
     // Push gate (ADR 0005): if `origin` is configured, push must succeed
-    // before the Pipeline Run is triggered.
-    push_or_abort(printer)?;
+    // before the Pipeline Run is triggered. Dirty local-dev deploys have no
+    // checkpoint commit, so there is nothing correct to push.
+    if commit_sha.is_some() {
+        push_or_abort(printer)?;
+    }
 
-    printer.progress("Minting access token...");
     let auth = load_auth().await?;
-    printer.progress("Creating project source archive...");
     let archive = build_component_archive("project")?;
     let mut form = Form::new().part(
         "bundle",
@@ -717,9 +762,14 @@ async fn deploy(
     if let Some(msg) = deploy_message.as_deref() {
         form = form.text("deploy_message", msg.to_string());
     }
+    if let Some(commits) = git::known_commits()? {
+        form = form.text("known_commits", commits.join("\n"));
+    }
+    if overwrite {
+        form = form.text("overwrite", "true");
+    }
 
     let client = http_client();
-    printer.progress("Uploading archive...");
     let response = client
         .post(format!(
             "{}/projects/{}/project/uploads?environment={}",
@@ -805,6 +855,9 @@ fn prepare_checkpoint(
 
     let sha = git::head_sha()?;
     if !auto_commit && !clean {
+        printer.progress(
+            "Deploying uncommitted local changes. Linked remote will not be pushed; the Gbandit Agent will not see these changes unless you commit/push/sync them.",
+        );
         return Ok((None, deploy_message));
     }
     Ok((sha, deploy_message))
@@ -1335,8 +1388,8 @@ fn build_component_archive(component: &str) -> Result<NamedTempFile> {
         .context("failed to reopen temporary archive")?;
     // zstd level 3 is the default and a strict win over gzip default (6):
     // smaller output and several times faster on the projects we bundle.
-    let encoder = zstd::stream::Encoder::new(writer, 3)
-        .context("failed to initialise zstd encoder")?;
+    let encoder =
+        zstd::stream::Encoder::new(writer, 3).context("failed to initialise zstd encoder")?;
     let mut tar = Builder::new(encoder);
 
     // Rely on .gitignore (and .ignore) for skipping build outputs, dependency
@@ -1418,8 +1471,7 @@ fn credentials_path() -> Result<PathBuf> {
 }
 
 fn auth_origin() -> String {
-    std::env::var("GBANDIT_AUTH_ORIGIN")
-        .unwrap_or_else(|_| "https://auth.gbandit.com".into())
+    std::env::var("GBANDIT_AUTH_ORIGIN").unwrap_or_else(|_| "https://auth.gbandit.com".into())
 }
 
 fn platform_api_origin() -> String {
@@ -1446,7 +1498,7 @@ fn load_project_config(cli_project: Option<String>) -> Result<ProjectConfig> {
             }
             Err(_) => Ok(ProjectConfig {
                 project,
-                auto_commit: default_auto_commit(),
+                local_dev: LocalDevConfig::default(),
             }),
         },
         None => read_gbandit_json(),
@@ -1474,7 +1526,7 @@ async fn parse_json<T: for<'de> Deserialize<'de>>(response: reqwest::Response) -
 async fn parse_error(response: reqwest::Response) -> String {
     let status = response.status();
     match response.json::<ErrorResponse>().await {
-        Ok(payload) => format!("{}: {}", status, payload.error),
+        Ok(payload) => payload.error,
         Err(_) => format!("{status}: request failed"),
     }
 }

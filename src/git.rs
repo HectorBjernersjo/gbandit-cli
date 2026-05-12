@@ -69,6 +69,35 @@ pub fn head_sha() -> Result<Option<String>> {
     }
 }
 
+/// All commits reachable from HEAD, newest first. `None` when this is not a
+/// git repository or HEAD does not exist yet.
+pub fn known_commits() -> Result<Option<Vec<String>>> {
+    let output = Command::new("git")
+        .args(["rev-list", "HEAD"])
+        .output()
+        .context("failed to run `git rev-list HEAD`")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_lowercase();
+        if stderr.contains("not a git repository")
+            || stderr.contains("unknown revision")
+            || stderr.contains("ambiguous argument")
+        {
+            return Ok(None);
+        }
+        bail!(
+            "`git rev-list HEAD` failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let commits = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .collect();
+    Ok(Some(commits))
+}
+
 /// Outcome of the push-or-abort gate inside `gbandit deploy` (ADR 0005).
 /// No origin → `NoRemote` (deploy proceeds without push); otherwise push
 /// and categorise so the CLI can show a useful next-step message.
