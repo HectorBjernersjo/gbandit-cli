@@ -16,8 +16,10 @@ use serde::{Deserialize, Serialize};
 use tar::Builder;
 use tempfile::NamedTempFile;
 
+const BUILD_VERSION: &str = env!("GBANDIT_BUILD_VERSION");
+
 #[derive(Parser)]
-#[command(name = "gbandit")]
+#[command(name = "gbandit", version = BUILD_VERSION)]
 struct Cli {
     /// Show subprocess output and per-stage status events.
     #[arg(short, long, global = true)]
@@ -121,9 +123,9 @@ fn format_event_timestamp(created_at: &str) -> Option<String> {
 /// route per-version behaviour (e.g. archive format support).
 fn http_client() -> reqwest::Client {
     let mut headers = reqwest::header::HeaderMap::new();
-    let value = format!("gbandit-cli/{}", env!("CARGO_PKG_VERSION"));
+    let value = format!("gbandit-cli/{BUILD_VERSION}");
     let header =
-        reqwest::header::HeaderValue::from_str(&value).expect("CARGO_PKG_VERSION must be ASCII");
+        reqwest::header::HeaderValue::from_str(&value).expect("build version must be ASCII");
     headers.insert(
         reqwest::header::HeaderName::from_static("gbandit-client"),
         header,
@@ -762,6 +764,7 @@ async fn deploy(
     if let Some(msg) = deploy_message.as_deref() {
         form = form.text("deploy_message", msg.to_string());
     }
+    form = form.text("has_origin", git::has_origin()?.to_string());
     if let Some(commits) = git::known_commits()? {
         form = form.text("known_commits", commits.join("\n"));
     }
