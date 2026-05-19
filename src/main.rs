@@ -35,15 +35,21 @@ struct Cli {
 struct Printer {
     verbose: bool,
     timestamps: bool,
+    json: bool,
 }
 
 impl Printer {
     /// CLI-side progress line. Always shown; timestamp follows the flag.
     fn progress(&self, msg: impl AsRef<str>) {
-        if self.timestamps {
-            println!("{} {}", local_timestamp(), msg.as_ref());
+        let line = if self.timestamps {
+            format!("{} {}", local_timestamp(), msg.as_ref())
         } else {
-            println!("{}", msg.as_ref());
+            msg.as_ref().to_string()
+        };
+        if self.json {
+            eprintln!("{line}");
+        } else {
+            println!("{line}");
         }
     }
 
@@ -96,10 +102,15 @@ impl Printer {
         } else {
             String::new()
         };
-        if prefix_ts.is_empty() {
-            println!("{label}{line}");
+        let rendered = if prefix_ts.is_empty() {
+            format!("{label}{line}")
         } else {
-            println!("{prefix_ts} {label}{line}");
+            format!("{prefix_ts} {label}{line}")
+        };
+        if self.json {
+            eprintln!("{rendered}");
+        } else {
+            println!("{rendered}");
         }
     }
 }
@@ -159,6 +170,12 @@ enum Command {
         /// not contain it. Use after intentional history rewrites.
         #[arg(long)]
         overwrite: bool,
+        /// Return after creating the Pipeline Run instead of waiting for completion.
+        #[arg(long)]
+        detach: bool,
+        /// Emit stable machine-readable JSON on stdout.
+        #[arg(long)]
+        json: bool,
     },
     Logs {
         component: LogTarget,
@@ -353,7 +370,7 @@ struct ErrorResponse {
     error: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct SourceUploadPipeline {
     pipeline_run_id: i64,
 }
@@ -407,8 +424,15 @@ struct BackendLogsResponse {
 }
 
 #[derive(Debug, Deserialize)]
+struct QueryColumn {
+    name: String,
+    #[serde(rename = "data_type")]
+    _data_type: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct QueryResponse {
-    columns: Vec<String>,
+    columns: Vec<QueryColumn>,
     rows: Vec<Vec<serde_json::Value>>,
 }
 
@@ -423,6 +447,7 @@ async fn main() -> Result<()> {
     let printer = Printer {
         verbose: cli.verbose,
         timestamps: cli.timestamps,
+        json: matches!(&cli.command, Command::Deploy { json: true, .. }),
     };
     match cli.command {
         Command::Login => login(&printer).await,
@@ -440,6 +465,8 @@ async fn main() -> Result<()> {
             project,
             message,
             overwrite,
+            detach,
+            json,
         } => {
             let config = load_project_config(project)?;
             deploy(
@@ -448,6 +475,8 @@ async fn main() -> Result<()> {
                 &config,
                 message.as_deref(),
                 overwrite,
+                detach,
+                json,
             )
             .await
         }
@@ -618,13 +647,13 @@ async fn sql(environment: &str, project: &str, query: &str) -> Result<()> {
     Ok(())
 }
 
-fn print_query_result(columns: &[String], rows: &[Vec<serde_json::Value>]) {
+fn print_query_result(columns: &[QueryColumn], rows: &[Vec<serde_json::Value>]) {
     if columns.is_empty() {
         println!("Query executed successfully. No rows returned.");
         return;
     }
 
-    let mut widths: Vec<usize> = columns.iter().map(|c| c.len()).collect();
+    let mut widths: Vec<usize> = columns.iter().map(|c| c.name.len()).collect();
     for row in rows {
         for (i, val) in row.iter().enumerate() {
             if i < widths.len() {
@@ -636,7 +665,7 @@ fn print_query_result(columns: &[String], rows: &[Vec<serde_json::Value>]) {
     let header: Vec<String> = columns
         .iter()
         .enumerate()
-        .map(|(i, c)| format!("{:width$}", c, width = widths[i]))
+        .map(|(i, c)| format!("{:width$}", c.name, width = widths[i]))
         .collect();
     println!(" {} ", header.join(" | "));
 
@@ -732,7 +761,46 @@ async fn deploy(
     config: &ProjectConfig,
     message: Option<&str>,
     overwrite: bool,
+    detach: bool,
+    json: bool,
 ) -> Result<()> {
+    let (client, auth, upload) =
+        start_deploy(printer, environment, config, message, overwrite).await?;
+
+    if json {
+        println!("{}", serde_json::to_string(&upload)?);
+    } else if detach {
+        printer.progress(format!(
+            "Started deploy {environment} for project {} as Pipeline Run #{}.",
+            config.project, upload.pipeline_run_id
+        ));
+    }
+
+    if detach {
+        return Ok(());
+    }
+
+    printer.progress(format!(
+        "Deploying {environment} for project {}...",
+        config.project
+    ));
+    watch_deploy_pipeline(
+        printer,
+        &client,
+        &auth.platform_api_origin,
+        &auth.token,
+        upload.pipeline_run_id,
+    )
+    .await
+}
+
+async fn start_deploy(
+    printer: &Printer,
+    environment: &str,
+    config: &ProjectConfig,
+    message: Option<&str>,
+    overwrite: bool,
+) -> Result<(reqwest::Client, CliAuth, SourceUploadPipeline)> {
     if overwrite {
         printer.progress(
             "Overwriting deploy lineage if necessary. Use this only after an intentional git history rewrite.",
@@ -784,16 +852,7 @@ async fn deploy(
         .await
         .context("failed to upload project source")?;
     let upload: SourceUploadPipeline = parse_json(response).await?;
-
-    printer.progress(format!("Deploying {environment} for project {project}..."));
-    watch_deploy_pipeline(
-        printer,
-        &client,
-        &auth.platform_api_origin,
-        &auth.token,
-        upload.pipeline_run_id,
-    )
-    .await
+    Ok((client, auth, upload))
 }
 
 /// Push gate (ADR 0005). Aborts the deploy if push fails.
@@ -1474,12 +1533,11 @@ fn credentials_path() -> Result<PathBuf> {
 }
 
 fn auth_origin() -> String {
-    std::env::var("GBANDIT_AUTH_ORIGIN").unwrap_or_else(|_| "https://auth.gbandit.com".into())
+    std::env::var("GBANDIT_AUTH_ORIGIN").expect("GBANDIT_AUTH_ORIGIN must be set")
 }
 
 fn platform_api_origin() -> String {
-    std::env::var("GBANDIT_PLATFORM_API_ORIGIN")
-        .unwrap_or_else(|_| "https://platform.gbandit.com/api".into())
+    std::env::var("GBANDIT_PLATFORM_API_ORIGIN").expect("GBANDIT_PLATFORM_API_ORIGIN must be set")
 }
 
 fn resolve_project(cli_project: Option<String>) -> Result<String> {
