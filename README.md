@@ -22,9 +22,12 @@ gbandit deploy --message "<what you just changed>"
 gbandit logs [frontend|backend]
 gbandit sql "SELECT ..."
 gbandit env [set|list|delete]
+gbandit update
 ```
 
 `gbandit deploy` defaults to the `dev` environment. Pass `--environment prod` for prod.
+
+`gbandit update` downloads the latest GitHub release for your OS/architecture and replaces the installed binary. Pin a specific release with `gbandit update --tag vX.Y.Z`.
 
 ## Building from source
 
