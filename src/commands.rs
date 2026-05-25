@@ -7,10 +7,12 @@ use crate::auth_session;
 use crate::cli::{Command, EnvAction, LogTarget, MigrateAction, ProjectAction};
 use crate::config::{load_project_config, resolve_project};
 use crate::deploy_workflow::{DeployWorkflow, migrate_down_to};
+use crate::new_command;
 use crate::platform_client::{PlatformClient, ProjectDeleteOutcome};
 use crate::printer::Printer;
 use crate::query_table::QueryTable;
 use crate::release_installer::ReleaseInstaller;
+use crate::scaffold::{self, ScaffoldOptions};
 
 pub(crate) async fn run(command: Command, printer: &Printer) -> Result<()> {
     match command {
@@ -100,6 +102,22 @@ pub(crate) async fn run(command: Command, printer: &Printer) -> Result<()> {
         Command::Project { action } => match action {
             ProjectAction::Delete { slug, yes } => project_delete(printer, &slug, yes).await,
         },
+        Command::New { name, title } => new_command::run(printer, name, title).await,
+        Command::Scaffold {
+            project,
+            target,
+            git_init,
+        } => {
+            let target = std::path::PathBuf::from(&target);
+            scaffold::scaffold_project(
+                printer,
+                ScaffoldOptions {
+                    slug: &project,
+                    target: &target,
+                    init_git: git_init,
+                },
+            )
+        }
         Command::Logout => auth_session::logout(printer).await,
     }
 }

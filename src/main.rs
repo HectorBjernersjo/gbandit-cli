@@ -6,11 +6,13 @@ mod deploy_archive;
 mod deploy_workflow;
 mod git;
 mod http;
+mod new_command;
 mod pipeline_watch;
 mod platform_client;
 mod printer;
 mod query_table;
 mod release_installer;
+mod scaffold;
 
 use anyhow::Result;
 use clap::Parser;

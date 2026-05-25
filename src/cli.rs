@@ -68,6 +68,32 @@ pub(crate) enum Command {
         #[command(subcommand)]
         action: ProjectAction,
     },
+    /// Create a new project on the platform and scaffold the game template
+    /// into ./<name>/. Pass "." as the name to scaffold into the current
+    /// directory instead. Interactive by default; --title skips the prompt.
+    New {
+        /// Project slug + directory name. Use "." for in-place scaffolding.
+        /// Prompted if omitted.
+        name: Option<String>,
+        /// Display title. Prompted if omitted.
+        #[arg(long)]
+        title: Option<String>,
+    },
+    /// Materialise the game template into TARGET for an existing project,
+    /// without contacting the API. Used by the Pi Agent entrypoint — humans
+    /// should use `gbandit init` instead.
+    #[command(hide = true)]
+    Scaffold {
+        /// Existing project slug to bind the workspace to.
+        #[arg(long)]
+        project: String,
+        /// Directory to scaffold into. Must be empty or non-existent.
+        #[arg(long)]
+        target: String,
+        /// Run `git init -b main` and an initial commit after scaffolding.
+        #[arg(long)]
+        git_init: bool,
+    },
     Logout,
 }
 

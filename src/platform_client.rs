@@ -190,6 +190,29 @@ impl PlatformClient {
         Ok(())
     }
 
+    pub(crate) async fn create_project(
+        &self,
+        slug: &str,
+        title: &str,
+    ) -> Result<CreatedProject> {
+        let response = self
+            .http
+            .post(format!("{}/projects", self.origin))
+            .bearer_auth(&self.token)
+            .json(&serde_json::json!({ "slug": slug, "title": title }))
+            .send()
+            .await
+            .context("failed to create project")?;
+
+        match response.status() {
+            StatusCode::CREATED => parse_json(response).await,
+            StatusCode::CONFLICT => bail!(parse_error(response).await),
+            StatusCode::BAD_REQUEST => bail!(parse_error(response).await),
+            StatusCode::UNAUTHORIZED => bail!("unauthorized — run `gbandit login`"),
+            _ => bail!(parse_error(response).await),
+        }
+    }
+
     pub(crate) async fn delete_project(&self, slug: &str) -> Result<ProjectDeleteOutcome> {
         let response = self
             .http
@@ -254,4 +277,9 @@ pub(crate) struct EnvVarsApiResponse {
 
 pub(crate) enum ProjectDeleteOutcome {
     Started,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct CreatedProject {
+    pub(crate) slug: String,
 }
