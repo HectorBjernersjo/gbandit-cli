@@ -4,16 +4,27 @@ The command-line client for the [gbandit](https://gbandit.com) game-hosting plat
 
 ## Install
 
+Linux / macOS:
+
 ```sh
 curl -fsSL https://github.com/HectorBjernersjo/gbandit-cli/releases/latest/download/install.sh | sh
 ```
 
 Drops the binary in `$HOME/.local/bin/gbandit`. Override with `GBANDIT_INSTALL_DIR` or pin a version with `GBANDIT_VERSION=v0.2.0`.
 
+Windows (PowerShell):
+
+```powershell
+irm https://github.com/HectorBjernersjo/gbandit-cli/releases/latest/download/install.ps1 | iex
+```
+
+Drops `gbandit.exe` in `%LOCALAPPDATA%\gbandit\bin` and adds it to your user `PATH`. Override with `$env:GBANDIT_INSTALL_DIR` or pin a version with `$env:GBANDIT_VERSION = 'v0.2.0'`.
+
 Prebuilt binaries are published for:
 
 - Linux x86_64 / aarch64
 - macOS x86_64 / aarch64
+- Windows x86_64 / aarch64
 
 ## Usage
 
@@ -50,4 +61,4 @@ When `GBANDIT_AUTH_ORIGIN` resolves to a localhost URL the CLI keeps a separate 
 
 ## Releases
 
-Tagging `vX.Y.Z` on `main` triggers `.github/workflows/release.yml`, which cross-compiles for all four targets and attaches the tarballs (and `install.sh`) to a GitHub release.
+Tagging `vX.Y.Z` on `main` triggers `.github/workflows/release.yml`, which cross-compiles for all supported targets and attaches the archives (and `install.sh` / `install.ps1`) to a GitHub release.

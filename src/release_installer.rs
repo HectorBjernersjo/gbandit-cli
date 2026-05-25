@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::Cursor;
+use std::io::{self, Cursor};
 use std::path::{Component as PathComponent, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -42,7 +42,7 @@ impl ReleaseInstaller {
         }
 
         let target = release_target()?;
-        let asset = format!("gbandit-{target}.tar.gz");
+        let asset = format!("gbandit-{target}.{}", archive_extension());
         let url = format!("https://github.com/{CLI_RELEASE_REPO}/releases/download/{tag}/{asset}");
         let install_path = cli_install_path()?;
 
@@ -63,12 +63,9 @@ impl ReleaseInstaller {
             .context("failed to read release archive")?;
 
         let tmp = tempdir().context("failed to create temporary update directory")?;
-        let decoder = GzDecoder::new(Cursor::new(archive));
-        let mut tar = tar::Archive::new(decoder);
-        tar.unpack(tmp.path())
-            .context("failed to unpack release archive")?;
+        extract_archive(&archive, tmp.path())?;
 
-        let new_binary = tmp.path().join("gbandit");
+        let new_binary = tmp.path().join(binary_file_name());
         if !new_binary.is_file() {
             bail!("release archive did not contain a gbandit binary");
         }
@@ -147,6 +144,7 @@ fn release_target() -> Result<String> {
     let os = match std::env::consts::OS {
         "linux" => "unknown-linux-musl",
         "macos" => "apple-darwin",
+        "windows" => "pc-windows-msvc",
         other => bail!("unsupported OS for self-update: {other}"),
     };
     let arch = match std::env::consts::ARCH {
@@ -157,15 +155,60 @@ fn release_target() -> Result<String> {
     Ok(format!("{arch}-{os}"))
 }
 
+fn archive_extension() -> &'static str {
+    if cfg!(windows) { "zip" } else { "tar.gz" }
+}
+
+fn binary_file_name() -> &'static str {
+    if cfg!(windows) { "gbandit.exe" } else { "gbandit" }
+}
+
+fn extract_archive(bytes: &[u8], dest: &Path) -> Result<()> {
+    if cfg!(windows) {
+        let reader = Cursor::new(bytes);
+        let mut zip = zip::ZipArchive::new(reader).context("failed to open release zip")?;
+        for i in 0..zip.len() {
+            let mut entry = zip.by_index(i).context("failed to read zip entry")?;
+            let Some(rel) = entry.enclosed_name() else {
+                continue;
+            };
+            let out_path = dest.join(rel);
+            if entry.is_dir() {
+                fs::create_dir_all(&out_path).with_context(|| {
+                    format!("failed to create directory {}", out_path.display())
+                })?;
+                continue;
+            }
+            if let Some(parent) = out_path.parent() {
+                fs::create_dir_all(parent).with_context(|| {
+                    format!("failed to create directory {}", parent.display())
+                })?;
+            }
+            let mut out = fs::File::create(&out_path)
+                .with_context(|| format!("failed to write {}", out_path.display()))?;
+            io::copy(&mut entry, &mut out)
+                .with_context(|| format!("failed to extract {}", out_path.display()))?;
+        }
+        Ok(())
+    } else {
+        let decoder = GzDecoder::new(Cursor::new(bytes));
+        let mut tar = tar::Archive::new(decoder);
+        tar.unpack(dest)
+            .context("failed to unpack release archive")?;
+        Ok(())
+    }
+}
+
 fn cli_install_path() -> Result<PathBuf> {
+    let file_name = binary_file_name();
     if let Some(dir) = std::env::var_os("GBANDIT_INSTALL_DIR") {
-        return Ok(PathBuf::from(dir).join("gbandit"));
+        return Ok(PathBuf::from(dir).join(file_name));
     }
 
     let current = std::env::current_exe().context("failed to locate current executable")?;
     if is_cargo_target_binary(&current) {
         let home = dirs::home_dir().context("failed to find home directory")?;
-        return Ok(home.join(".local/bin/gbandit"));
+        return Ok(home.join(".local/bin").join(file_name));
     }
     Ok(current)
 }
