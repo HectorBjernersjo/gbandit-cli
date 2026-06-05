@@ -83,6 +83,12 @@ pub(crate) async fn run(
             target_path.display()
         ));
     }
+    printer.progress(
+        "Tip: to also build this project with the Pi Agent in the web UI, \
+         link a git remote first from Project Settings — without one the \
+         agent starts from a fresh template and won't see your local code."
+            .to_string(),
+    );
     Ok(())
 }
 

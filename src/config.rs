@@ -42,12 +42,14 @@ fn default_auto_commit() -> bool {
     true
 }
 
+/// Env vars are dev overrides (set by the gbandit-dev alias); defaults point at prod.
 pub(crate) fn auth_origin() -> String {
-    std::env::var("GBANDIT_AUTH_ORIGIN").expect("GBANDIT_AUTH_ORIGIN must be set")
+    std::env::var("GBANDIT_AUTH_ORIGIN").unwrap_or_else(|_| "https://auth.gbandit.com".into())
 }
 
 pub(crate) fn platform_api_origin() -> String {
-    std::env::var("GBANDIT_PLATFORM_API_ORIGIN").expect("GBANDIT_PLATFORM_API_ORIGIN must be set")
+    std::env::var("GBANDIT_PLATFORM_API_ORIGIN")
+        .unwrap_or_else(|_| "https://platform.gbandit.com/api".into())
 }
 
 pub(crate) fn resolve_project(cli_project: Option<String>) -> Result<String> {

@@ -8,9 +8,14 @@ use tar::Builder;
 use tempfile::NamedTempFile;
 
 pub(crate) fn build_component_archive(component: &str) -> Result<NamedTempFile> {
-    let root = match component {
-        "project" => PathBuf::from("."),
-        other => PathBuf::from(other),
+    // For "project" the archive root is the cwd, with paths preserved
+    // as-is (frontend/..., backend/...). For component subtrees the
+    // archive must preserve the component's path so the executor's
+    // extraction lands files at the expected workspace location
+    // (e.g. backend/migrations/0001_init.up.sql).
+    let (root, archive_prefix) = match component {
+        "project" => (PathBuf::from("."), PathBuf::new()),
+        other => (PathBuf::from(other), PathBuf::from(other)),
     };
     if !root.is_dir() {
         bail!("component directory not found: {}", root.display());
@@ -56,12 +61,13 @@ pub(crate) fn build_component_archive(component: &str) -> Result<NamedTempFile> 
         let relative = path
             .strip_prefix(&root)
             .with_context(|| format!("failed to strip archive root for {}", path.display()))?;
+        let archive_path = archive_prefix.join(relative);
 
         if file_type.is_dir() {
-            tar.append_dir(relative, path)?;
+            tar.append_dir(&archive_path, path)?;
         } else if file_type.is_file() {
             let mut file = fs::File::open(path)?;
-            tar.append_file(relative, &mut file)?;
+            tar.append_file(&archive_path, &mut file)?;
         }
     }
 

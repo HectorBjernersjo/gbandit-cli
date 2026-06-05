@@ -186,8 +186,28 @@ async fn cli_access_token(credentials: &StoredCredentials) -> Result<String> {
         .send()
         .await
         .context("failed to mint platform access token")?;
+    // A 401 here means the stored session no longer authenticates. The raw
+    // body is unhelpful ("401 Unauthorized: request failed"), so say whether
+    // it expired and point at `gbandit login`.
+    if response.status() == StatusCode::UNAUTHORIZED {
+        bail!(session_rejected_message(credentials));
+    }
     let token: AccessTokenResponse = parse_json(response).await?;
     Ok(token.access_token)
+}
+
+fn session_rejected_message(credentials: &StoredCredentials) -> String {
+    let expired = chrono::DateTime::parse_from_rfc3339(&credentials.session_expires_at)
+        .map(|expiry| expiry.with_timezone(&chrono::Utc) <= chrono::Utc::now())
+        .unwrap_or(false);
+    if expired {
+        format!(
+            "Session expired at {}. Run `gbandit login` to re-authenticate.",
+            credentials.session_expires_at
+        )
+    } else {
+        "Session is no longer valid. Run `gbandit login` to re-authenticate.".to_string()
+    }
 }
 
 /// Uses `GBANDIT_ACCESS_TOKEN` (e.g. inside an agent pod) when set;
