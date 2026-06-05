@@ -79,9 +79,18 @@ impl<'a> DeployWorkflow<'a> {
 
         // Push gate (ADR 0005): if `origin` is configured, push must succeed
         // before the Pipeline Run is triggered. Dirty local-dev deploys have no
-        // checkpoint commit, so there is nothing correct to push.
+        // checkpoint commit, so there is nothing correct to push. With
+        // auto_commit=false the user syncs the linked remote themselves; the
+        // checkpoint becomes restorable once its commit reaches the remote
+        // (unreachable commits are filtered as orphans, PRD 0005).
         if commit_sha.is_some() {
-            push_or_abort(self.printer)?;
+            if config.auto_commit() {
+                push_or_abort(self.printer)?;
+            } else if git::has_origin()? {
+                self.printer.progress(
+                    "Skipping push to linked remote (auto_commit=false). The checkpoint becomes restorable once you push.",
+                );
+            }
         }
 
         let archive = build_component_archive("project")?;
@@ -193,7 +202,8 @@ fn push_or_abort(printer: &Printer) -> Result<()> {
 /// - auto_commit=true, dirty: commit then return HEAD.
 /// - auto_commit=true, clean: return HEAD (no empty commit).
 /// - auto_commit=false, dirty: `commit_sha = None` (deploy, not checkpoint).
-/// - auto_commit=false, clean: return HEAD (still lands as a checkpoint).
+/// - auto_commit=false, clean: return HEAD (still lands as a checkpoint,
+///   but the deploy never pushes — restorable once the user pushes).
 fn prepare_checkpoint(
     printer: &Printer,
     auto_commit: bool,

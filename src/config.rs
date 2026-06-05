@@ -24,8 +24,10 @@ impl ProjectConfig {
 
 #[derive(Debug, Deserialize)]
 struct LocalDevConfig {
-    /// When true (default), `deploy` auto-commits a dirty tree so every
-    /// deploy is a checkpoint. False: never touches git history.
+    /// When true (default), `deploy` auto-commits a dirty tree and pushes to
+    /// the linked remote so every deploy is a synced checkpoint. False: the
+    /// CLI never touches git — no commits, no push; you sync the remote
+    /// yourself.
     #[serde(default = "default_auto_commit")]
     auto_commit: bool,
 }
