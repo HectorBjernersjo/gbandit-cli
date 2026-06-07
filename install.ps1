@@ -51,6 +51,21 @@ try {
 
 Write-Host "Installed: $(Join-Path $installDir 'gbandit.exe')"
 
+Write-Host ""
+Write-Host "Get started:"
+Write-Host ""
+Write-Host "  gbandit login                  # authenticate this machine"
+Write-Host "  gbandit new my-game            # create a project, scaffolded into .\my-game"
+Write-Host "  cd my-game; gbandit deploy     # live on your dev URL in one command"
+Write-Host ""
+Write-Host "Already have a project on gbandit?"
+Write-Host ""
+Write-Host "  Link a git remote to it under your project's settings on"
+Write-Host "  platform.gbandit.com — then any clone of that repo can deploy:"
+Write-Host ""
+Write-Host "  git clone <your-remote>; cd <your-repo>"
+Write-Host "  gbandit deploy"
+
 $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 $pathEntries = if ($userPath) { $userPath -split ';' } else { @() }
 if ($pathEntries -notcontains $installDir) {

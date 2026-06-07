@@ -30,11 +30,18 @@ struct ErrorResponse {
 pub(crate) async fn parse_json<T: for<'de> Deserialize<'de>>(
     response: reqwest::Response,
 ) -> Result<T> {
-    if response.status().is_success() {
-        return response
-            .json::<T>()
+    let status = response.status();
+    if status.is_success() {
+        let bytes = response
+            .bytes()
             .await
-            .context("failed to decode response JSON");
+            .context("failed to read response body")?;
+        return serde_json::from_slice(&bytes).with_context(|| {
+            format!(
+                "failed to decode response JSON (status {status}): {}",
+                body_snippet(&bytes)
+            )
+        });
     }
 
     bail!(parse_error(response).await)
@@ -42,8 +49,26 @@ pub(crate) async fn parse_json<T: for<'de> Deserialize<'de>>(
 
 pub(crate) async fn parse_error(response: reqwest::Response) -> String {
     let status = response.status();
-    match response.json::<ErrorResponse>().await {
+    let message = match response.json::<ErrorResponse>().await {
         Ok(payload) => payload.error,
-        Err(_) => format!("{status}: request failed"),
+        Err(_) => format!("request failed with status {status}"),
+    };
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        format!("{message} — run `gbandit login` to re-authenticate")
+    } else {
+        message
     }
+}
+
+fn body_snippet(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return "<empty body>".to_string();
+    }
+    let mut snippet: String = trimmed.chars().take(200).collect();
+    if trimmed.chars().count() > 200 {
+        snippet.push('…');
+    }
+    snippet
 }

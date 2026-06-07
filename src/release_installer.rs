@@ -53,6 +53,12 @@ impl ReleaseInstaller {
             .send()
             .await
             .with_context(|| format!("failed to download {url}"))?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            bail!(
+                "release {tag} does not provide {asset} (or the tag does not exist) — \
+                 see available releases at https://github.com/{CLI_RELEASE_REPO}/releases"
+            );
+        }
         if !response.status().is_success() {
             let status = response.status();
             bail!("failed to download {url}: {status}");

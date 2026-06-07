@@ -42,6 +42,11 @@ pub(crate) enum Command {
         /// not contain it. Use after intentional history rewrites.
         #[arg(long)]
         overwrite: bool,
+        /// Agent warm build: deploys the fresh scaffold to warm the build
+        /// cache without claiming deploy lineage. Server-side it is skipped
+        /// entirely if the project already has a succeeded deploy.
+        #[arg(long, hide = true)]
+        baseline: bool,
         /// Return after creating the Pipeline Run instead of waiting for completion.
         #[arg(long)]
         detach: bool,
@@ -81,7 +86,7 @@ pub(crate) enum Command {
     },
     /// Materialise the game template into TARGET for an existing project,
     /// without contacting the API. Used by the Pi Agent entrypoint — humans
-    /// should use `gbandit init` instead.
+    /// should use `gbandit new` instead.
     #[command(hide = true)]
     Scaffold {
         /// Existing project slug to bind the workspace to.

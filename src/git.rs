@@ -4,6 +4,15 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
+/// True when the cwd is inside a git work tree.
+pub fn in_repo() -> Result<bool> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .output()
+        .context("failed to run `git` — is git installed?")?;
+    Ok(output.status.success())
+}
+
 /// True when the working tree has no uncommitted changes and no untracked files.
 pub fn is_clean() -> Result<bool> {
     let output = Command::new("git")

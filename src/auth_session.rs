@@ -33,15 +33,12 @@ struct CliLoginStartResponse {
 #[derive(Debug, Deserialize)]
 struct AccessTokenResponse {
     access_token: String,
-    token_type: String,
-    expires_at: String,
 }
 
 #[derive(Debug, Deserialize)]
 struct CliLoginPollCompleteResponse {
     session_token: String,
     session_expires_at: String,
-    access_token: AccessTokenResponse,
     user_id: String,
     email: Option<String>,
     name: Option<String>,
@@ -59,8 +56,11 @@ pub(crate) async fn login(printer: &Printer) -> Result<()> {
         .post(format!("{auth_origin}/api/cli/login/start"))
         .send()
         .await
-        .context("failed to start browser login")?;
+        .with_context(|| {
+            format!("could not reach the auth server at {auth_origin} — check your network connection")
+        })?;
     let start: CliLoginStartResponse = parse_json(response).await?;
+    let login_expires_at = chrono::DateTime::parse_from_rfc3339(&start.expires_at).ok();
 
     printer.progress("Open this URL to complete login:");
     printer.progress(&start.authorize_url);
@@ -70,6 +70,12 @@ pub(crate) async fn login(printer: &Printer) -> Result<()> {
     printer.progress("Waiting for login approval...");
 
     loop {
+        if let Some(expiry) = login_expires_at
+            && chrono::Utc::now() >= expiry
+        {
+            bail!("login request expired before it was approved in the browser — run `gbandit login` to start over");
+        }
+
         let response = client
             .post(format!("{auth_origin}/api/cli/login/poll"))
             .json(&serde_json::json!({
@@ -78,7 +84,9 @@ pub(crate) async fn login(printer: &Printer) -> Result<()> {
             }))
             .send()
             .await
-            .context("failed while polling browser login")?;
+            .with_context(|| {
+                format!("could not reach the auth server at {auth_origin} — check your network connection")
+            })?;
 
         if response.status() == StatusCode::ACCEPTED {
             tokio::time::sleep(Duration::from_secs(start.poll_interval_seconds)).await;
@@ -107,14 +115,6 @@ pub(crate) async fn login(printer: &Printer) -> Result<()> {
         printer.progress(format!(
             "Session expires at {}",
             credentials.session_expires_at
-        ));
-        printer.progress(format!(
-            "Browser login request expired at {}",
-            start.expires_at
-        ));
-        printer.progress(format!(
-            "Access token expires at {} ({})",
-            completed.access_token.expires_at, completed.access_token.token_type
         ));
         break;
     }
@@ -152,26 +152,45 @@ pub(crate) async fn whoami(printer: &Printer) -> Result<()> {
 }
 
 pub(crate) async fn logout(printer: &Printer) -> Result<()> {
-    let credentials = load_credentials()?;
+    let path = credentials_path()?;
+    let Ok(credentials) = load_credentials() else {
+        // Missing file → already logged out; unreadable file → just clear it.
+        if path.exists() {
+            fs::remove_file(&path)
+                .with_context(|| format!("failed to remove credentials file {}", path.display()))?;
+            printer.progress("Logged out.");
+        } else {
+            printer.progress("Already logged out.");
+        }
+        return Ok(());
+    };
+
+    // Best-effort server-side revoke: local credentials are removed even when
+    // it fails, so logout can't get wedged on a dead session or offline network.
     let client = http_client();
-    let response = client
+    let revoke_error = match client
         .post(format!("{}/api/cli/logout", credentials.auth_origin))
         .json(&serde_json::json!({
             "session_token": credentials.session_token,
         }))
         .send()
         .await
-        .context("failed to log out")?;
-    if !response.status().is_success() {
-        let error = parse_error(response).await;
-        bail!(error);
-    }
-    let path = credentials_path()?;
+    {
+        Ok(response) if response.status().is_success() => None,
+        Ok(response) => Some(parse_error(response).await),
+        Err(err) => Some(err.to_string()),
+    };
+
     if path.exists() {
         fs::remove_file(&path)
             .with_context(|| format!("failed to remove credentials file {}", path.display()))?;
     }
-    printer.progress("Logged out.");
+    match revoke_error {
+        None => printer.progress("Logged out."),
+        Some(err) => printer.progress(format!(
+            "Logged out locally, but the session could not be revoked on the server: {err}"
+        )),
+    }
     Ok(())
 }
 
@@ -265,9 +284,22 @@ fn load_credentials() -> Result<StoredCredentials> {
     }
 
     let path = credentials_path()?;
-    let bytes = fs::read(&path)
-        .with_context(|| format!("failed to read credentials file {}", path.display()))?;
-    serde_json::from_slice(&bytes).context("failed to parse credentials file")
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            bail!("You are not logged in. Run `gbandit login` to get started.")
+        }
+        Err(err) => {
+            return Err(err)
+                .with_context(|| format!("failed to read credentials file {}", path.display()));
+        }
+    };
+    serde_json::from_slice(&bytes).with_context(|| {
+        format!(
+            "credentials file {} is unreadable — run `gbandit login` to re-authenticate",
+            path.display()
+        )
+    })
 }
 
 fn credentials_path() -> Result<PathBuf> {

@@ -5,6 +5,7 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ProjectConfig {
     pub(crate) project: String,
     #[serde(default)]
@@ -23,6 +24,7 @@ impl ProjectConfig {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct LocalDevConfig {
     /// When true (default), `deploy` auto-commits a dirty tree and pushes to
     /// the linked remote so every deploy is a synced checkpoint. False: the

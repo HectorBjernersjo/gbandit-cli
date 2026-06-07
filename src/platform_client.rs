@@ -53,15 +53,19 @@ impl PlatformClient {
             .send()
             .await
             .context("failed to execute query")?;
-        parse_json(response).await
+        parse_json(response)
+            .await
+            .with_context(|| format!("query against project '{project}' ({environment}) failed"))
     }
 
+    /// `Ok(None)` = the server skipped a baseline deploy (200 instead of 202)
+    /// because the project already has a succeeded deploy.
     pub(crate) async fn upload_project_source(
         &self,
         project: &str,
         environment: &str,
         form: Form,
-    ) -> Result<SourceUploadPipeline> {
+    ) -> Result<Option<SourceUploadPipeline>> {
         let response = self
             .http
             .post(format!(
@@ -73,7 +77,12 @@ impl PlatformClient {
             .send()
             .await
             .context("failed to upload project source")?;
-        parse_json(response).await
+        if response.status() == reqwest::StatusCode::OK {
+            return Ok(None);
+        }
+        Ok(Some(parse_json(response).await.with_context(|| {
+            format!("failed to start deploy for project '{project}' ({environment})")
+        })?))
     }
 
     pub(crate) async fn upload_migrate_down(
@@ -92,7 +101,9 @@ impl PlatformClient {
             .send()
             .await
             .context("failed to upload migrate-down request")?;
-        parse_json(response).await
+        parse_json(response)
+            .await
+            .with_context(|| format!("failed to start migrate-down for project '{project}'"))
     }
 
     pub(crate) async fn backend_logs(&self, environment: &str, project: &str) -> Result<String> {
@@ -106,7 +117,9 @@ impl PlatformClient {
             .send()
             .await
             .context("failed to fetch backend logs")?;
-        let snapshot: BackendLogsResponse = parse_json(response).await?;
+        let snapshot: BackendLogsResponse = parse_json(response).await.with_context(|| {
+            format!("failed to fetch backend logs for project '{project}' ({environment})")
+        })?;
         Ok(snapshot.logs)
     }
 
@@ -125,7 +138,9 @@ impl PlatformClient {
             .send()
             .await
             .context("failed to fetch frontend logs")?;
-        let snapshot: FrontendLogsListResponse = parse_json(response).await?;
+        let snapshot: FrontendLogsListResponse = parse_json(response).await.with_context(|| {
+            format!("failed to fetch frontend logs for project '{project}' ({environment})")
+        })?;
         Ok(snapshot.logs)
     }
 
@@ -146,7 +161,9 @@ impl PlatformClient {
             .send()
             .await
             .context("failed to set environment variables")?;
-        let result: EnvVarsApiResponse = parse_json(response).await?;
+        let result: EnvVarsApiResponse = parse_json(response).await.with_context(|| {
+            format!("failed to set env vars for project '{project}' ({environment})")
+        })?;
         Ok(result.vars)
     }
 
@@ -165,7 +182,9 @@ impl PlatformClient {
             .send()
             .await
             .context("failed to list environment variables")?;
-        parse_json(response).await
+        parse_json(response).await.with_context(|| {
+            format!("failed to list env vars for project '{project}' ({environment})")
+        })
     }
 
     pub(crate) async fn delete_env(
@@ -185,7 +204,10 @@ impl PlatformClient {
             .await
             .context("failed to delete environment variable")?;
         if !response.status().is_success() {
-            bail!(parse_error(response).await);
+            let error = parse_error(response).await;
+            bail!(
+                "failed to delete env var {key} for project '{project}' ({environment}): {error}"
+            );
         }
         Ok(())
     }
@@ -206,9 +228,7 @@ impl PlatformClient {
 
         match response.status() {
             StatusCode::CREATED => parse_json(response).await,
-            StatusCode::CONFLICT => bail!(parse_error(response).await),
-            StatusCode::BAD_REQUEST => bail!(parse_error(response).await),
-            StatusCode::UNAUTHORIZED => bail!("unauthorized — run `gbandit login`"),
+            // parse_error already maps 401 to a `gbandit login` hint.
             _ => bail!(parse_error(response).await),
         }
     }

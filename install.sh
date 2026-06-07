@@ -52,6 +52,21 @@ chmod +x "$INSTALL_DIR/gbandit"
 
 echo "Installed: $INSTALL_DIR/gbandit"
 
+echo ""
+echo "Get started:"
+echo ""
+echo "  gbandit login                  # authenticate this machine"
+echo "  gbandit new my-game            # create a project, scaffolded into ./my-game"
+echo "  cd my-game && gbandit deploy   # live on your dev URL in one command"
+echo ""
+echo "Already have a project on gbandit?"
+echo ""
+echo "  Link a git remote to it under your project's settings on"
+echo "  platform.gbandit.com — then any clone of that repo can deploy:"
+echo ""
+echo "  git clone <your-remote> && cd <your-repo>"
+echo "  gbandit deploy"
+
 case ":$PATH:" in
     *":$INSTALL_DIR:"*) ;;
     *) echo ""; echo "NOTE: $INSTALL_DIR is not in your PATH. Add it to your shell rc:"; echo "  export PATH=\"$INSTALL_DIR:\$PATH\"" ;;

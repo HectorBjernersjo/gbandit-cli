@@ -41,6 +41,7 @@ pub(crate) async fn run(command: Command, printer: &Printer) -> Result<()> {
             project,
             message,
             overwrite,
+            baseline,
             detach,
             json,
         } => {
@@ -51,6 +52,7 @@ pub(crate) async fn run(command: Command, printer: &Printer) -> Result<()> {
                     &config,
                     message.as_deref(),
                     overwrite,
+                    baseline,
                     detach,
                     json,
                 )

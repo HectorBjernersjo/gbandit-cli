@@ -1,6 +1,6 @@
 //! Materialise a fresh project workspace from the gbandit-game template.
 //!
-//! Shared by `gbandit init` (local, interactive) and `gbandit scaffold`
+//! Shared by `gbandit new` (local, interactive) and `gbandit scaffold`
 //! (non-interactive, used by the Pi Agent entrypoint). Owning the
 //! clone+substitute+gbandit.json+initial-commit flow in one place lets the
 //! agent image stop shelling out to git/sed for the same job.

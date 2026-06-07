@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
+use crate::http::parse_error;
 use crate::printer::Printer;
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Hash)]
@@ -92,9 +93,10 @@ pub(crate) async fn watch_deploy_pipeline(
         .await
         .context("failed to open deploy event stream")?;
     if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        bail!("stream request failed ({status}): {body}");
+        bail!(
+            "failed to follow deploy progress: {}",
+            parse_error(response).await
+        );
     }
 
     let mut buf = String::new();
@@ -113,7 +115,10 @@ pub(crate) async fn watch_deploy_pipeline(
             }
         }
     }
-    bail!("deploy event stream ended unexpectedly")
+    bail!(
+        "lost connection to the deploy event stream — the deploy may still be running on the platform. \
+         Check the project dashboard or `gbandit logs backend` to see how it ended."
+    )
 }
 
 /// `Some(result)` when the deploy reaches a terminal state.

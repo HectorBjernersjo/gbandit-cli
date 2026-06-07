@@ -26,12 +26,24 @@ impl<'a> DeployWorkflow<'a> {
         config: &ProjectConfig,
         message: Option<&str>,
         overwrite: bool,
+        baseline: bool,
         detach: bool,
         json: bool,
     ) -> Result<()> {
         let (client, upload) = self
-            .start_deploy(environment, config, message, overwrite)
+            .start_deploy(environment, config, message, overwrite, baseline)
             .await?;
+
+        let Some(upload) = upload else {
+            if json {
+                println!("{}", serde_json::json!({ "status": "baseline_skipped" }));
+            } else {
+                self.printer.progress(
+                    "Baseline deploy skipped — the project already has a succeeded deploy.",
+                );
+            }
+            return Ok(());
+        };
 
         if json {
             println!("{}", serde_json::to_string(&upload)?);
@@ -66,7 +78,8 @@ impl<'a> DeployWorkflow<'a> {
         config: &ProjectConfig,
         message: Option<&str>,
         overwrite: bool,
-    ) -> Result<(PlatformClient, SourceUploadPipeline)> {
+        baseline: bool,
+    ) -> Result<(PlatformClient, Option<SourceUploadPipeline>)> {
         if overwrite {
             self.printer.progress(
                 "Overwriting deploy lineage if necessary. Use this only after an intentional git history rewrite.",
@@ -112,6 +125,9 @@ impl<'a> DeployWorkflow<'a> {
         }
         if overwrite {
             form = form.text("overwrite", "true");
+        }
+        if baseline {
+            form = form.text("baseline", "true");
         }
 
         let client = PlatformClient::from_saved_auth().await?;
@@ -213,6 +229,18 @@ fn prepare_checkpoint(
     let deploy_message = message.map(str::to_string);
     let canned = || format!("gbandit deploy {environment}");
     let commit_message = message.map(str::to_string).unwrap_or_else(canned);
+
+    if !git::in_repo()? {
+        if !auto_commit {
+            printer.progress("Skipping commit_sha: not a git repository.");
+            return Ok((None, deploy_message));
+        }
+        bail!(
+            "deploy checkpoints require a git repository and this directory is not one — \
+             run `git init`, or set local_dev.auto_commit to false in gbandit.json \
+             to deploy without checkpoints"
+        );
+    }
 
     let clean = match git::is_clean() {
         Ok(value) => value,
