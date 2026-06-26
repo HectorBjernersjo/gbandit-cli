@@ -217,6 +217,7 @@ fn write_gbandit_json(target: &Path, slug: &str) -> Result<()> {
     let path = target.join("gbandit.json");
     let body = serde_json::json!({
         "project": slug,
+        "database": "none",
         "local_dev": { "auto_commit": true },
     });
     let pretty = serde_json::to_string_pretty(&body)?;

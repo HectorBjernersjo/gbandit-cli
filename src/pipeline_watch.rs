@@ -76,6 +76,14 @@ fn default_log_level() -> String {
 /// Per-stage Debug-line buffer, dumped if the stage fails.
 type StageLogBuffer = HashMap<String, Vec<(Option<String>, String)>>;
 
+enum StreamOutcome {
+    /// The pipeline reached a terminal state; carries the deploy result.
+    Terminal(Result<()>),
+    /// The connection dropped (transport EOF, idle reset, proxy reload) before a
+    /// terminal event. The caller reconnects with `?since=` and resumes.
+    Disconnected,
+}
+
 pub(crate) async fn watch_deploy_pipeline(
     printer: &Printer,
     client: &reqwest::Client,
@@ -83,15 +91,94 @@ pub(crate) async fn watch_deploy_pipeline(
     token: &str,
     pipeline_run_id: i64,
 ) -> Result<()> {
-    let mut response = client
+    // The server's event stream is resumable (`?since=N`; each event carries its
+    // sequence as the SSE `id:`), so a dropped connection mid-build isn't fatal:
+    // reconnect from the last sequence we saw and carry on. The longest deploys
+    // (a from-scratch backend build) hold the stream open for minutes and are the
+    // most exposed to a transient drop. Only a run of reconnects that make no
+    // progress gives up.
+    const MAX_RECONNECTS: u32 = 10;
+    let mut buffers: StageLogBuffer = HashMap::new();
+    let mut last_event_id: Option<i64> = None;
+    let mut failures: u32 = 0;
+
+    loop {
+        let resume_from = last_event_id;
+        match stream_once(
+            printer,
+            client,
+            platform_api_origin,
+            token,
+            pipeline_run_id,
+            resume_from,
+            &mut buffers,
+            &mut last_event_id,
+        )
+        .await?
+        {
+            StreamOutcome::Terminal(result) => return result,
+            StreamOutcome::Disconnected => {
+                // Forward progress on the dropped connection earns a fresh
+                // reconnect budget; only a stall (repeated drops with nothing
+                // new) trips the limit.
+                if last_event_id != resume_from {
+                    failures = 0;
+                }
+                failures += 1;
+                if failures > MAX_RECONNECTS {
+                    bail!(
+                        "lost connection to the deploy event stream after {MAX_RECONNECTS} reconnect attempts \
+                         — the deploy may still be running on the platform. \
+                         Check the project dashboard or `gbandit logs backend` to see how it ended."
+                    );
+                }
+                printer.debug(
+                    "pipeline",
+                    None,
+                    &format!(
+                        "event stream dropped; reconnecting ({failures}/{MAX_RECONNECTS}) from sequence {}",
+                        resume_from.map_or_else(|| "start".to_string(), |s| s.to_string())
+                    ),
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(
+                    500 * u64::from(failures.min(6)),
+                ))
+                .await;
+            }
+        }
+    }
+}
+
+/// One connection attempt. Reads SSE events, updating `buffers` and
+/// `last_event_id`, until either the pipeline reaches a terminal state
+/// (`Terminal`) or the connection drops (`Disconnected`). A non-success HTTP
+/// status (gone, unauthorized) is a hard error, not a reconnectable drop.
+async fn stream_once(
+    printer: &Printer,
+    client: &reqwest::Client,
+    platform_api_origin: &str,
+    token: &str,
+    pipeline_run_id: i64,
+    since: Option<i64>,
+    buffers: &mut StageLogBuffer,
+    last_event_id: &mut Option<i64>,
+) -> Result<StreamOutcome> {
+    let mut request = client
         .get(format!(
             "{platform_api_origin}/pipelines/{pipeline_run_id}/stream"
         ))
         .bearer_auth(token)
-        .header("accept", "text/event-stream")
-        .send()
-        .await
-        .context("failed to open deploy event stream")?;
+        .header("accept", "text/event-stream");
+    if let Some(since) = since {
+        request = request.query(&[("since", since)]);
+    }
+
+    let mut response = match request.send().await {
+        Ok(response) => response,
+        // Couldn't open the connection — treat as a drop so the caller retries
+        // under its reconnect budget rather than failing the whole deploy.
+        Err(_) => return Ok(StreamOutcome::Disconnected),
+    };
     if !response.status().is_success() {
         bail!(
             "failed to follow deploy progress: {}",
@@ -100,31 +187,29 @@ pub(crate) async fn watch_deploy_pipeline(
     }
 
     let mut buf = String::new();
-    let mut buffers: StageLogBuffer = HashMap::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .context("failed to read event stream chunk")?
-    {
+    loop {
+        let chunk = match response.chunk().await {
+            Ok(Some(chunk)) => chunk,
+            // Clean EOF or a transport error mid-stream, without a terminal
+            // event — reconnect and resume from `last_event_id`.
+            Ok(None) | Err(_) => return Ok(StreamOutcome::Disconnected),
+        };
         buf.push_str(&String::from_utf8_lossy(&chunk));
         while let Some(end) = buf.find("\n\n") {
             let raw_event = buf[..end].to_string();
             buf.drain(..end + 2);
-            if let Some(outcome) = handle_sse_event(printer, &mut buffers, &raw_event)? {
-                return outcome;
+            if let Some(outcome) = handle_sse_event(printer, buffers, last_event_id, &raw_event)? {
+                return Ok(StreamOutcome::Terminal(outcome));
             }
         }
     }
-    bail!(
-        "lost connection to the deploy event stream — the deploy may still be running on the platform. \
-         Check the project dashboard or `gbandit logs backend` to see how it ended."
-    )
 }
 
 /// `Some(result)` when the deploy reaches a terminal state.
 fn handle_sse_event(
     printer: &Printer,
     buffers: &mut StageLogBuffer,
+    last_event_id: &mut Option<i64>,
     raw: &str,
 ) -> Result<Option<Result<()>>> {
     let mut event_type = String::new();
@@ -137,6 +222,12 @@ fn handle_sse_event(
             event_type = v.trim().to_string();
         } else if let Some(v) = line.strip_prefix("data:") {
             data_lines.push(v.strip_prefix(' ').unwrap_or(v));
+        } else if let Some(v) = line.strip_prefix("id:") {
+            // The sequence cursor for `?since=` on reconnect. Tracked even for
+            // events we can't fully parse, mirroring the server's replay cursor.
+            if let Ok(seq) = v.trim().parse::<i64>() {
+                *last_event_id = Some(seq);
+            }
         }
     }
     let data = data_lines.join("\n");

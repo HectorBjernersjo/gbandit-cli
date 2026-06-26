@@ -8,8 +8,26 @@ use serde::Deserialize;
 #[serde(deny_unknown_fields)]
 pub(crate) struct ProjectConfig {
     pub(crate) project: String,
+    /// Tenant database engine for the whole project (ADR 0014). Immutable once
+    /// any env has provisioned a DB; supersedes ADR 0006's migration trigger.
+    #[serde(default)]
+    pub(crate) database: DatabaseEngine,
     #[serde(default)]
     local_dev: LocalDevConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum DatabaseEngine {
+    None,
+    Postgres,
+    Sqlite,
+}
+
+impl Default for DatabaseEngine {
+    fn default() -> Self {
+        Self::None
+    }
 }
 
 impl ProjectConfig {
@@ -75,6 +93,7 @@ pub(crate) fn load_project_config(cli_project: Option<String>) -> Result<Project
             }
             Err(_) => Ok(ProjectConfig {
                 project,
+                database: DatabaseEngine::default(),
                 local_dev: LocalDevConfig::default(),
             }),
         },

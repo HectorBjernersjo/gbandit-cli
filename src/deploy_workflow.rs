@@ -4,8 +4,8 @@ use std::path::PathBuf;
 use anyhow::{Result, bail};
 use reqwest::multipart::{Form, Part};
 
-use crate::config::ProjectConfig;
-use crate::deploy_archive::build_component_archive;
+use crate::config::{DatabaseEngine, ProjectConfig};
+use crate::deploy_archive::{build_component_archive, build_migrate_down_archive};
 use crate::git;
 use crate::pipeline_watch::watch_deploy_pipeline;
 use crate::platform_client::{PlatformClient, SourceUploadPipeline};
@@ -87,6 +87,13 @@ impl<'a> DeployWorkflow<'a> {
         }
 
         let project = &config.project;
+
+        if config.database == DatabaseEngine::None && has_up_migrations() {
+            bail!(
+                "you have migrations in backend/migrations but database=none in gbandit.json; set database to sqlite or postgres"
+            );
+        }
+
         let (commit_sha, deploy_message) =
             prepare_checkpoint(self.printer, config.auto_commit(), environment, message)?;
 
@@ -138,6 +145,20 @@ impl<'a> DeployWorkflow<'a> {
     }
 }
 
+/// True when `backend/migrations` holds at least one `*.up.sql` file — the
+/// signal that the project expects a database (ADR 0014 §1.4).
+fn has_up_migrations() -> bool {
+    let Ok(entries) = fs::read_dir("backend/migrations") else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.ends_with(".up.sql"))
+    })
+}
+
 pub(crate) async fn migrate_down_to(
     printer: &Printer,
     project: &str,
@@ -156,7 +177,7 @@ pub(crate) async fn migrate_down_to(
     printer.progress("Minting access token...");
     let client = PlatformClient::from_saved_auth().await?;
     printer.progress("Creating migrations archive...");
-    let archive = build_component_archive("backend/migrations")?;
+    let archive = build_migrate_down_archive()?;
     let mut form = Form::new()
         .part(
             "bundle",

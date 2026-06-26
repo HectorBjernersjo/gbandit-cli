@@ -7,6 +7,60 @@ use ignore::WalkBuilder;
 use tar::Builder;
 use tempfile::NamedTempFile;
 
+/// Archive for `migrate down-to`: `backend/migrations` (what the migrator
+/// rolls) plus `gbandit.json` so the executor resolves the project's engine
+/// (ADR 0014 — the workspace copy is the engine source of truth). Without it
+/// the engine reads as `none` and the immutability check rejects the run.
+pub(crate) fn build_migrate_down_archive() -> Result<NamedTempFile> {
+    let migrations = PathBuf::from("backend/migrations");
+    if !migrations.is_dir() {
+        bail!("component directory not found: backend/migrations");
+    }
+    let config = PathBuf::from("gbandit.json");
+    if !config.is_file() {
+        bail!("gbandit.json not found in the current directory");
+    }
+
+    let temp = NamedTempFile::new().context("failed to create temporary archive")?;
+    let writer = temp.reopen().context("failed to reopen temporary archive")?;
+    let encoder =
+        zstd::stream::Encoder::new(writer, 3).context("failed to initialise zstd encoder")?;
+    let mut tar = Builder::new(encoder);
+
+    let mut config_file = fs::File::open(&config)?;
+    tar.append_file("gbandit.json", &mut config_file)?;
+
+    let walker = WalkBuilder::new(&migrations)
+        .standard_filters(true)
+        .hidden(false)
+        .build();
+    for entry in walker {
+        let entry = entry.context("failed to walk backend/migrations")?;
+        let path = entry.path();
+        if path == migrations {
+            continue;
+        }
+        let Some(file_type) = entry.file_type() else {
+            continue;
+        };
+        let relative = path
+            .strip_prefix(&migrations)
+            .with_context(|| format!("failed to strip archive root for {}", path.display()))?;
+        let archive_path = PathBuf::from("backend/migrations").join(relative);
+        if file_type.is_dir() {
+            tar.append_dir(&archive_path, path)?;
+        } else if file_type.is_file() {
+            let mut file = fs::File::open(path)?;
+            tar.append_file(&archive_path, &mut file)?;
+        }
+    }
+
+    let encoder = tar.into_inner().context("failed to finalize tar archive")?;
+    let mut file = encoder.finish().context("failed to finish zstd archive")?;
+    file.flush().context("failed to flush archive")?;
+    Ok(temp)
+}
+
 pub(crate) fn build_component_archive(component: &str) -> Result<NamedTempFile> {
     // For "project" the archive root is the cwd, with paths preserved
     // as-is (frontend/..., backend/...). For component subtrees the
