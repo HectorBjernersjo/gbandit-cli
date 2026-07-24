@@ -104,7 +104,7 @@ pub(crate) enum Command {
 
 #[derive(Subcommand)]
 pub(crate) enum ProjectAction {
-    /// Delete a project entirely (ADR 0004). No undo. Owner-only.
+    /// Delete a project entirely. No undo. Project-member and human-only.
     Delete {
         /// Project slug to delete.
         slug: String,

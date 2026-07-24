@@ -304,12 +304,27 @@ fn load_credentials() -> Result<StoredCredentials> {
 
 fn credentials_path() -> Result<PathBuf> {
     let config_dir = dirs::config_dir().context("failed to determine config directory")?;
-    // Keep dev and prod credentials in separate files so they don't clobber
-    // each other when a developer runs against both.
-    let filename = if auth_origin().contains("localhost") {
-        "credentials-dev.json"
-    } else {
-        "credentials.json"
-    };
+    let filename = format!("credentials-{}.json", credentials_identity());
     Ok(config_dir.join("gbandit").join(filename))
+}
+
+/// Scopes the stored login to one deployment, derived the same way the frontends
+/// derive their base domain: the last two labels of the auth host. So all
+/// subdomains of an instance (auth./platform.) share one login, while distinct
+/// deployments (wt1.gbandit, main.gbandit, gbandit.com) never clobber each other.
+fn credentials_identity() -> String {
+    let origin = auth_origin();
+    let host = reqwest::Url::parse(&origin)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_string))
+        .unwrap_or_else(|| origin.clone());
+    if host == "localhost" || host == "127.0.0.1" {
+        return "localhost".to_string();
+    }
+    let labels: Vec<&str> = host.split('.').collect();
+    if labels.len() >= 2 {
+        labels[labels.len() - 2..].join(".")
+    } else {
+        host
+    }
 }

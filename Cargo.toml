@@ -19,3 +19,4 @@ tempfile = "3"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 webbrowser = "1"
+uuid = { version = "1", features = ["v4"] }

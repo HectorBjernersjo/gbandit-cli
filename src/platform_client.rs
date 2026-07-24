@@ -60,21 +60,21 @@ impl PlatformClient {
 
     /// `Ok(None)` = the server skipped a baseline deploy (200 instead of 202)
     /// because the project already has a succeeded deploy.
-    pub(crate) async fn upload_project_source(
+    pub(crate) async fn upload_project_source<F>(
         &self,
         project: &str,
         environment: &str,
-        form: Form,
-    ) -> Result<Option<SourceUploadPipeline>> {
+        make_form: F,
+    ) -> Result<Option<SourceUploadPipeline>>
+    where
+        F: Fn() -> Result<Form>,
+    {
+        let url = format!(
+            "{}/projects/{}/project/uploads?environment={}",
+            self.origin, project, environment
+        );
         let response = self
-            .http
-            .post(format!(
-                "{}/projects/{}/project/uploads?environment={}",
-                self.origin, project, environment
-            ))
-            .bearer_auth(&self.token)
-            .multipart(form)
-            .send()
+            .post_multipart_with_retry(&url, &make_form)
             .await
             .context("failed to upload project source")?;
         if response.status() == reqwest::StatusCode::OK {
@@ -85,25 +85,57 @@ impl PlatformClient {
         })?))
     }
 
-    pub(crate) async fn upload_migrate_down(
+    pub(crate) async fn upload_migrate_down<F>(
         &self,
         project: &str,
-        form: Form,
-    ) -> Result<SourceUploadPipeline> {
+        make_form: F,
+    ) -> Result<SourceUploadPipeline>
+    where
+        F: Fn() -> Result<Form>,
+    {
+        let url = format!(
+            "{}/projects/{}/backend/migrate-down?environment=dev",
+            self.origin, project
+        );
         let response = self
-            .http
-            .post(format!(
-                "{}/projects/{}/backend/migrate-down?environment=dev",
-                self.origin, project
-            ))
-            .bearer_auth(&self.token)
-            .multipart(form)
-            .send()
+            .post_multipart_with_retry(&url, &make_form)
             .await
             .context("failed to upload migrate-down request")?;
         parse_json(response)
             .await
             .with_context(|| format!("failed to start migrate-down for project '{project}'"))
+    }
+
+    async fn post_multipart_with_retry<F>(
+        &self,
+        url: &str,
+        make_form: &F,
+    ) -> Result<reqwest::Response>
+    where
+        F: Fn() -> Result<Form>,
+    {
+        let mut last_transport_error = None;
+        for attempt in 0..3 {
+            let request = self
+                .http
+                .post(url)
+                .bearer_auth(&self.token)
+                .multipart(make_form()?);
+            match request.send().await {
+                Ok(response) if response.status().is_server_error() && attempt < 2 => {
+                    tokio::time::sleep(std::time::Duration::from_millis(250 * (attempt + 1))).await;
+                }
+                Ok(response) => return Ok(response),
+                Err(error) if attempt < 2 => {
+                    last_transport_error = Some(error);
+                    tokio::time::sleep(std::time::Duration::from_millis(250 * (attempt + 1))).await;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Err(last_transport_error
+            .expect("three retry attempts always retain a transport error")
+            .into())
     }
 
     pub(crate) async fn backend_logs(&self, environment: &str, project: &str) -> Result<String> {
@@ -212,11 +244,7 @@ impl PlatformClient {
         Ok(())
     }
 
-    pub(crate) async fn create_project(
-        &self,
-        slug: &str,
-        title: &str,
-    ) -> Result<CreatedProject> {
+    pub(crate) async fn create_project(&self, slug: &str, title: &str) -> Result<CreatedProject> {
         let response = self
             .http
             .post(format!("{}/projects", self.origin))
@@ -244,7 +272,6 @@ impl PlatformClient {
 
         match response.status() {
             StatusCode::ACCEPTED => Ok(ProjectDeleteOutcome::Started),
-            StatusCode::FORBIDDEN => bail!("forbidden: only owners can delete a project"),
             StatusCode::NOT_FOUND => bail!("project '{slug}' not found"),
             _ => bail!(parse_error(response).await),
         }

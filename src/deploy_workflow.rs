@@ -113,34 +113,57 @@ impl<'a> DeployWorkflow<'a> {
             }
         }
 
+        let timing = std::env::var("GBANDIT_TIMING").is_ok();
+
+        let archive_started = std::time::Instant::now();
         let archive = build_component_archive("project")?;
-        let mut form = Form::new().part(
-            "bundle",
-            Part::bytes(fs::read(archive.path())?)
-                .file_name("project.tar.zst".to_string())
-                .mime_str("application/zstd")?,
-        );
-        if let Some(sha) = commit_sha.as_deref() {
-            form = form.text("commit_sha", sha.to_string());
+        if timing {
+            eprintln!(
+                "@timing phase=archive ms={}",
+                archive_started.elapsed().as_millis()
+            );
         }
-        if let Some(msg) = deploy_message.as_deref() {
-            form = form.text("deploy_message", msg.to_string());
-        }
-        form = form.text("has_origin", git::has_origin()?.to_string());
-        if let Some(commits) = git::known_commits()? {
-            form = form.text("known_commits", commits.join("\n"));
-        }
-        if overwrite {
-            form = form.text("overwrite", "true");
-        }
-        if baseline {
-            form = form.text("baseline", "true");
-        }
+        let archive_bytes = fs::read(archive.path())?;
+        let submission_id = uuid::Uuid::new_v4().to_string();
+        let has_origin = git::has_origin()?.to_string();
+        let known_commits = git::known_commits()?.map(|commits| commits.join("\n"));
 
         let client = PlatformClient::from_saved_auth().await?;
+        let upload_started = std::time::Instant::now();
         let upload = client
-            .upload_project_source(project, environment, form)
+            .upload_project_source(project, environment, || {
+                let mut form = Form::new()
+                    .text("submission_id", submission_id.clone())
+                    .text("has_origin", has_origin.clone());
+                if let Some(sha) = commit_sha.as_deref() {
+                    form = form.text("commit_sha", sha.to_string());
+                }
+                if let Some(msg) = deploy_message.as_deref() {
+                    form = form.text("deploy_message", msg.to_string());
+                }
+                if let Some(commits) = known_commits.as_deref() {
+                    form = form.text("known_commits", commits.to_string());
+                }
+                if overwrite {
+                    form = form.text("overwrite", "true");
+                }
+                if baseline {
+                    form = form.text("baseline", "true");
+                }
+                Ok(form.part(
+                    "bundle",
+                    Part::bytes(archive_bytes.clone())
+                        .file_name("project.tar.zst".to_string())
+                        .mime_str("application/zstd")?,
+                ))
+            })
             .await?;
+        if timing {
+            eprintln!(
+                "@timing phase=upload ms={}",
+                upload_started.elapsed().as_millis()
+            );
+        }
         Ok((client, upload))
     }
 }
@@ -178,20 +201,26 @@ pub(crate) async fn migrate_down_to(
     let client = PlatformClient::from_saved_auth().await?;
     printer.progress("Creating migrations archive...");
     let archive = build_migrate_down_archive()?;
-    let mut form = Form::new()
-        .part(
-            "bundle",
-            Part::bytes(fs::read(archive.path())?)
-                .file_name("migrations.tar.zst".to_string())
-                .mime_str("application/zstd")?,
-        )
-        .text("target_migration_version", target.to_string());
-    if let Some(msg) = message {
-        form = form.text("deploy_message", msg.to_string());
-    }
+    let archive_bytes = fs::read(archive.path())?;
+    let submission_id = uuid::Uuid::new_v4().to_string();
 
     printer.progress("Uploading archive...");
-    let upload = client.upload_migrate_down(project, form).await?;
+    let upload = client
+        .upload_migrate_down(project, || {
+            let mut form = Form::new()
+                .text("target_migration_version", target.to_string())
+                .text("submission_id", submission_id.clone());
+            if let Some(msg) = message {
+                form = form.text("deploy_message", msg.to_string());
+            }
+            Ok(form.part(
+                "bundle",
+                Part::bytes(archive_bytes.clone())
+                    .file_name("migrations.tar.zst".to_string())
+                    .mime_str("application/zstd")?,
+            ))
+        })
+        .await?;
 
     printer.progress(format!(
         "Migrating dev tenant DB for project {project} down to version {target}..."
