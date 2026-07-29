@@ -47,6 +47,10 @@ pub(crate) enum Command {
         /// entirely if the project already has a succeeded deploy.
         #[arg(long, hide = true)]
         baseline: bool,
+        /// Create the project on the platform without asking when it does
+        /// not exist yet.
+        #[arg(long)]
+        create: bool,
         /// Return after creating the Pipeline Run instead of waiting for completion.
         #[arg(long)]
         detach: bool,
@@ -73,31 +77,21 @@ pub(crate) enum Command {
         #[command(subcommand)]
         action: ProjectAction,
     },
-    /// Create a new project on the platform and scaffold the game template
-    /// into ./<name>/. Pass "." as the name to scaffold into the current
-    /// directory instead. Interactive by default; --title skips the prompt.
-    New {
+    /// Scaffold the game template into ./<name>/ (or the current directory
+    /// when NAME is "."). Purely local — the platform project is created on
+    /// your first `gbandit deploy`.
+    Scaffold {
         /// Project slug + directory name. Use "." for in-place scaffolding.
         /// Prompted if omitted.
         name: Option<String>,
-        /// Display title. Prompted if omitted.
+        /// Display title, stored as `title` in gbandit.json — deploy keeps
+        /// the platform title in sync with that field. Prompted if omitted.
         #[arg(long)]
         title: Option<String>,
-    },
-    /// Materialise the game template into TARGET for an existing project,
-    /// without contacting the API. Used by the Pi Agent entrypoint — humans
-    /// should use `gbandit new` instead.
-    #[command(hide = true)]
-    Scaffold {
-        /// Existing project slug to bind the workspace to.
-        #[arg(long)]
-        project: String,
-        /// Directory to scaffold into. Must be empty or non-existent.
-        #[arg(long)]
-        target: String,
-        /// Run `git init -b main` and an initial commit after scaffolding.
-        #[arg(long)]
-        git_init: bool,
+        /// Scaffold into this directory instead of ./<name>/. Used by the
+        /// Pi Agent entrypoint.
+        #[arg(long, hide = true)]
+        target: Option<String>,
     },
     Logout,
 }

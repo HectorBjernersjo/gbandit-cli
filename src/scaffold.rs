@@ -1,7 +1,7 @@
 //! Materialise a fresh project workspace from the gbandit-game template.
 //!
-//! Shared by `gbandit new` (local, interactive) and `gbandit scaffold`
-//! (non-interactive, used by the Pi Agent entrypoint). Owning the
+//! Backs `gbandit scaffold` for both humans (interactive) and the Pi Agent
+//! entrypoint (non-interactive, via --target). Owning the
 //! clone+substitute+gbandit.json+initial-commit flow in one place lets the
 //! agent image stop shelling out to git/sed for the same job.
 
@@ -22,6 +22,10 @@ pub(crate) struct ScaffoldOptions<'a> {
     /// Agent pod sets this so the workspace PVC starts with a single
     /// linear-history commit owned entirely by this project.
     pub(crate) init_git: bool,
+    /// Written as `title` in gbandit.json when present, opting the project
+    /// into deploy-managed titles. Agent scaffolds pass None so a deploy
+    /// can't clobber a title set in the web UI.
+    pub(crate) title: Option<&'a str>,
 }
 
 pub(crate) fn scaffold_project(printer: &Printer, opts: ScaffoldOptions<'_>) -> Result<()> {
@@ -73,7 +77,7 @@ pub(crate) fn scaffold_project(printer: &Printer, opts: ScaffoldOptions<'_>) -> 
     let slug_underscored = opts.slug.replace('-', "_");
     substitute_placeholders(opts.target, opts.slug, &slug_underscored)?;
 
-    write_gbandit_json(opts.target, opts.slug)?;
+    write_gbandit_json(opts.target, opts.slug, opts.title)?;
 
     if opts.init_git {
         printer.progress("Initialising git repo with initial commit...");
@@ -100,6 +104,22 @@ fn is_valid_slug(slug: &str) -> bool {
     bytes
         .iter()
         .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-')
+}
+
+/// "space-shooter" → "Space Shooter". The default platform title when
+/// gbandit.json doesn't manage one.
+pub(crate) fn title_from_slug(slug: &str) -> String {
+    slug.split('-')
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => first.to_ascii_uppercase().to_string() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 pub(crate) fn slugify(title: &str) -> String {
@@ -213,13 +233,16 @@ fn looks_like_text(bytes: &[u8]) -> bool {
     !head.contains(&0)
 }
 
-fn write_gbandit_json(target: &Path, slug: &str) -> Result<()> {
+fn write_gbandit_json(target: &Path, slug: &str, title: Option<&str>) -> Result<()> {
     let path = target.join("gbandit.json");
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "project": slug,
         "database": "none",
         "local_dev": { "auto_commit": true },
     });
+    if let Some(title) = title {
+        body["title"] = serde_json::Value::String(title.to_string());
+    }
     let pretty = serde_json::to_string_pretty(&body)?;
     fs::write(&path, format!("{pretty}\n"))
         .with_context(|| format!("failed to write {}", path.display()))?;

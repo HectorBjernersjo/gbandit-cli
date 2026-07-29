@@ -7,12 +7,11 @@ use crate::auth_session;
 use crate::cli::{Command, EnvAction, LogTarget, MigrateAction, ProjectAction};
 use crate::config::{load_project_config, resolve_project};
 use crate::deploy_workflow::{DeployWorkflow, migrate_down_to};
-use crate::new_command;
 use crate::platform_client::{PlatformClient, ProjectDeleteOutcome};
 use crate::printer::Printer;
 use crate::query_table::QueryTable;
 use crate::release_installer::ReleaseInstaller;
-use crate::scaffold::{self, ScaffoldOptions};
+use crate::scaffold_command;
 
 pub(crate) async fn run(command: Command, printer: &Printer) -> Result<()> {
     match command {
@@ -42,6 +41,7 @@ pub(crate) async fn run(command: Command, printer: &Printer) -> Result<()> {
             message,
             overwrite,
             baseline,
+            create,
             detach,
             json,
         } => {
@@ -53,6 +53,7 @@ pub(crate) async fn run(command: Command, printer: &Printer) -> Result<()> {
                     message.as_deref(),
                     overwrite,
                     baseline,
+                    create,
                     detach,
                     json,
                 )
@@ -104,22 +105,11 @@ pub(crate) async fn run(command: Command, printer: &Printer) -> Result<()> {
         Command::Project { action } => match action {
             ProjectAction::Delete { slug, yes } => project_delete(printer, &slug, yes).await,
         },
-        Command::New { name, title } => new_command::run(printer, name, title).await,
         Command::Scaffold {
-            project,
+            name,
+            title,
             target,
-            git_init,
-        } => {
-            let target = std::path::PathBuf::from(&target);
-            scaffold::scaffold_project(
-                printer,
-                ScaffoldOptions {
-                    slug: &project,
-                    target: &target,
-                    init_git: git_init,
-                },
-            )
-        }
+        } => scaffold_command::run(printer, name, title, target).await,
         Command::Logout => auth_session::logout(printer).await,
     }
 }
@@ -131,25 +121,28 @@ async fn logs(
     project: &str,
 ) -> Result<()> {
     let client = PlatformClient::from_saved_auth().await?;
-    match component {
-        LogTarget::Backend => {
-            let logs = client.backend_logs(environment, project).await?;
-            if !logs.is_empty() {
-                print!("{logs}");
-            }
-            Ok(())
-        }
-        LogTarget::Frontend => {
-            let logs = client.frontend_logs(environment, project).await?;
-            if logs.is_empty() {
-                printer.progress("No frontend logs recorded.");
-                return Ok(());
-            }
+    let source = match component {
+        LogTarget::Backend => "backend",
+        LogTarget::Frontend => "frontend",
+    };
+    let logs = client.logs(environment, project, source).await?;
+    if logs.is_empty() {
+        printer.progress(&format!("No {source} logs recorded."));
+        return Ok(());
+    }
 
-            // Response is newest-first; print oldest-first.
-            for entry in logs.iter().rev() {
-                let time = entry.created_at.get(11..19).unwrap_or(&entry.created_at);
-                let level = entry.level.to_uppercase();
+    // Response is newest-first; print oldest-first.
+    for entry in logs.iter().rev() {
+        let time = entry.timestamp.get(11..19).unwrap_or(&entry.timestamp);
+        let level = entry
+            .level
+            .as_deref()
+            .map(str::to_uppercase)
+            .unwrap_or_default();
+        match component {
+            // Browser logs carry who hit them and where, which is the whole
+            // reason to look at them.
+            LogTarget::Frontend => {
                 let user = entry
                     .user_name
                     .as_deref()
@@ -163,9 +156,10 @@ async fn logs(
                     msg = entry.message,
                 );
             }
-            Ok(())
+            LogTarget::Backend => println!("{time} {msg}", msg = entry.message),
         }
     }
+    Ok(())
 }
 
 /// Strip scheme + host from a URL.

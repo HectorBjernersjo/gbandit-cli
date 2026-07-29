@@ -1,7 +1,8 @@
 use std::fs;
+use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use reqwest::multipart::{Form, Part};
 
 use crate::config::{DatabaseEngine, ProjectConfig};
@@ -10,6 +11,7 @@ use crate::git;
 use crate::pipeline_watch::watch_deploy_pipeline;
 use crate::platform_client::{PlatformClient, SourceUploadPipeline};
 use crate::printer::Printer;
+use crate::scaffold::title_from_slug;
 
 pub(crate) struct DeployWorkflow<'a> {
     printer: &'a Printer,
@@ -27,11 +29,12 @@ impl<'a> DeployWorkflow<'a> {
         message: Option<&str>,
         overwrite: bool,
         baseline: bool,
+        create: bool,
         detach: bool,
         json: bool,
     ) -> Result<()> {
         let (client, upload) = self
-            .start_deploy(environment, config, message, overwrite, baseline)
+            .start_deploy(environment, config, message, overwrite, baseline, create, json)
             .await?;
 
         let Some(upload) = upload else {
@@ -79,6 +82,8 @@ impl<'a> DeployWorkflow<'a> {
         message: Option<&str>,
         overwrite: bool,
         baseline: bool,
+        create: bool,
+        json: bool,
     ) -> Result<(PlatformClient, Option<SourceUploadPipeline>)> {
         if overwrite {
             self.printer.progress(
@@ -93,6 +98,13 @@ impl<'a> DeployWorkflow<'a> {
                 "you have migrations in backend/migrations but database=none in gbandit.json; set database to sqlite or postgres"
             );
         }
+
+        // Ensure the platform project exists (and its title matches
+        // gbandit.json) before any local side effects like the checkpoint
+        // auto-commit — answering "n" to the create prompt must leave the
+        // working tree untouched.
+        let client = PlatformClient::from_saved_auth().await?;
+        self.ensure_project(&client, config, create, json).await?;
 
         let (commit_sha, deploy_message) =
             prepare_checkpoint(self.printer, config.auto_commit(), environment, message)?;
@@ -128,7 +140,6 @@ impl<'a> DeployWorkflow<'a> {
         let has_origin = git::has_origin()?.to_string();
         let known_commits = git::known_commits()?.map(|commits| commits.join("\n"));
 
-        let client = PlatformClient::from_saved_auth().await?;
         let upload_started = std::time::Instant::now();
         let upload = client
             .upload_project_source(project, environment, || {
@@ -166,6 +177,67 @@ impl<'a> DeployWorkflow<'a> {
         }
         Ok((client, upload))
     }
+
+    /// Create-on-deploy (with confirmation) plus title sync: gbandit.json is
+    /// the source of truth for the title whenever it carries one.
+    async fn ensure_project(
+        &self,
+        client: &PlatformClient,
+        config: &ProjectConfig,
+        create: bool,
+        json: bool,
+    ) -> Result<()> {
+        let slug = &config.project;
+        match client.get_project(slug).await? {
+            Some(existing) => {
+                if let Some(title) = config.title.as_deref().map(str::trim) {
+                    if title != existing.title {
+                        client.update_project_title(slug, title).await?;
+                        self.printer
+                            .progress(format!("Updated project title to \"{title}\"."));
+                    }
+                }
+            }
+            None => {
+                if !create && !confirm_create(slug, json)? {
+                    bail!("aborted: project '{slug}' was not created");
+                }
+                let title = config
+                    .title
+                    .as_deref()
+                    .map(str::trim)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| title_from_slug(slug));
+                self.printer.progress(format!(
+                    "Creating project '{slug}' (title: \"{title}\") on the platform..."
+                ));
+                let created = client.create_project(slug, &title).await?;
+                self.printer
+                    .progress(format!("Project '{}' created.", created.slug));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Typo guard: a misspelled `project` in gbandit.json must not silently
+/// become a fresh project. `--create` is the non-interactive opt-in.
+fn confirm_create(slug: &str, json: bool) -> Result<bool> {
+    if json || !std::io::stdin().is_terminal() {
+        bail!(
+            "project '{slug}' does not exist on the platform — pass --create to create it on deploy"
+        );
+    }
+    print!("Project '{slug}' does not exist on the platform. Create it? [Y/n] ");
+    std::io::stdout().flush().ok();
+    let mut line = String::new();
+    std::io::stdin()
+        .read_line(&mut line)
+        .context("failed to read confirmation")?;
+    Ok(matches!(
+        line.trim().to_ascii_lowercase().as_str(),
+        "" | "y" | "yes"
+    ))
 }
 
 /// True when `backend/migrations` holds at least one `*.up.sql` file — the

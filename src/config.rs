@@ -8,6 +8,12 @@ use serde::Deserialize;
 #[serde(deny_unknown_fields)]
 pub(crate) struct ProjectConfig {
     pub(crate) project: String,
+    /// Display title. When present, deploy keeps the platform title in sync
+    /// with this field (and uses it when first creating the project). Absent
+    /// = deploy leaves the platform title alone; agent scaffolds omit it so
+    /// a deploy can't clobber a title set in the web UI.
+    #[serde(default)]
+    pub(crate) title: Option<String>,
     /// Tenant database engine for the whole project (ADR 0014). Immutable once
     /// any env has provisioned a DB; supersedes ADR 0006's migration trigger.
     #[serde(default)]
@@ -93,6 +99,7 @@ pub(crate) fn load_project_config(cli_project: Option<String>) -> Result<Project
             }
             Err(_) => Ok(ProjectConfig {
                 project,
+                title: None,
                 database: DatabaseEngine::default(),
                 local_dev: LocalDevConfig::default(),
             }),

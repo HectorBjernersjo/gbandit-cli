@@ -138,40 +138,26 @@ impl PlatformClient {
             .into())
     }
 
-    pub(crate) async fn backend_logs(&self, environment: &str, project: &str) -> Result<String> {
-        let response = self
-            .http
-            .get(format!(
-                "{}/projects/{}/backend/logs?environment={}&tail_lines=2000",
-                self.origin, project, environment
-            ))
-            .bearer_auth(&self.token)
-            .send()
-            .await
-            .context("failed to fetch backend logs")?;
-        let snapshot: BackendLogsResponse = parse_json(response).await.with_context(|| {
-            format!("failed to fetch backend logs for project '{project}' ({environment})")
-        })?;
-        Ok(snapshot.logs)
-    }
-
-    pub(crate) async fn frontend_logs(
+    /// Both sources come from the same store, so one call shape serves both
+    /// (kubernetes-infra: docs/plans/tenant_logs_via_loki.md).
+    pub(crate) async fn logs(
         &self,
         environment: &str,
         project: &str,
-    ) -> Result<Vec<FrontendLog>> {
+        source: &str,
+    ) -> Result<Vec<LogEntry>> {
         let response = self
             .http
             .get(format!(
-                "{}/projects/{}/frontend/logs?environment={}&limit=200",
-                self.origin, project, environment
+                "{}/projects/{}/logs?source={}&environment={}&limit=1000",
+                self.origin, project, source, environment
             ))
             .bearer_auth(&self.token)
             .send()
             .await
-            .context("failed to fetch frontend logs")?;
-        let snapshot: FrontendLogsListResponse = parse_json(response).await.with_context(|| {
-            format!("failed to fetch frontend logs for project '{project}' ({environment})")
+            .context("failed to fetch logs")?;
+        let snapshot: LogsResponse = parse_json(response).await.with_context(|| {
+            format!("failed to fetch {source} logs for project '{project}' ({environment})")
         })?;
         Ok(snapshot.logs)
     }
@@ -244,6 +230,55 @@ impl PlatformClient {
         Ok(())
     }
 
+    /// `Ok(None)` = the project does not exist (404).
+    pub(crate) async fn get_project(&self, slug: &str) -> Result<Option<ProjectSummary>> {
+        let response = self
+            .http
+            .get(format!("{}/projects/{slug}", self.origin))
+            .bearer_auth(&self.token)
+            .send()
+            .await
+            .context("failed to fetch project")?;
+        match response.status() {
+            StatusCode::NOT_FOUND => Ok(None),
+            StatusCode::OK => Ok(Some(parse_json(response).await?)),
+            _ => bail!(parse_error(response).await),
+        }
+    }
+
+    pub(crate) async fn slug_availability(&self, slug: &str) -> Result<SlugAvailability> {
+        let response = self
+            .http
+            .get(format!("{}/projects/{slug}/availability", self.origin))
+            .bearer_auth(&self.token)
+            .send()
+            .await
+            .context("failed to check slug availability")?;
+        let parsed: SlugAvailabilityResponse = parse_json(response).await?;
+        Ok(match (parsed.status.as_str(), parsed.owned_by_you) {
+            ("free", _) => SlugAvailability::Free,
+            ("taken", true) => SlugAvailability::TakenByYou,
+            ("taken", false) => SlugAvailability::TakenByOther,
+            ("deleting", _) => SlugAvailability::Deleting,
+            (other, _) => bail!("unknown availability status '{other}'"),
+        })
+    }
+
+    pub(crate) async fn update_project_title(&self, slug: &str, title: &str) -> Result<()> {
+        let response = self
+            .http
+            .patch(format!("{}/projects/{slug}/game-profile", self.origin))
+            .bearer_auth(&self.token)
+            .json(&serde_json::json!({ "title": title }))
+            .send()
+            .await
+            .context("failed to update project title")?;
+        if !response.status().is_success() {
+            bail!(parse_error(response).await);
+        }
+        Ok(())
+    }
+
     pub(crate) async fn create_project(&self, slug: &str, title: &str) -> Result<CreatedProject> {
         let response = self
             .http
@@ -297,23 +332,21 @@ pub(crate) struct SourceUploadPipeline {
 }
 
 #[derive(Debug, Deserialize)]
-struct BackendLogsResponse {
-    logs: String,
+struct LogsResponse {
+    logs: Vec<LogEntry>,
 }
 
 #[derive(Debug, Deserialize)]
-struct FrontendLogsListResponse {
-    logs: Vec<FrontendLog>,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct FrontendLog {
-    pub(crate) level: String,
+pub(crate) struct LogEntry {
+    pub(crate) timestamp: String,
+    pub(crate) level: Option<String>,
     pub(crate) message: String,
+    #[serde(default)]
     pub(crate) source_url: Option<String>,
+    #[serde(default)]
     pub(crate) user_name: Option<String>,
+    #[serde(default)]
     pub(crate) user_is_anon: Option<bool>,
-    pub(crate) created_at: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -329,4 +362,23 @@ pub(crate) enum ProjectDeleteOutcome {
 #[derive(Debug, Deserialize)]
 pub(crate) struct CreatedProject {
     pub(crate) slug: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ProjectSummary {
+    pub(crate) title: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SlugAvailabilityResponse {
+    status: String,
+    owned_by_you: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum SlugAvailability {
+    Free,
+    TakenByYou,
+    TakenByOther,
+    Deleting,
 }
