@@ -76,6 +76,11 @@ fn default_log_level() -> String {
 /// Per-stage Debug-line buffer, dumped if the stage fails.
 type StageLogBuffer = HashMap<String, Vec<(Option<String>, String)>>;
 
+/// Newest log timestamp seen per stage. Log deltas carry no SSE id (they left
+/// the journal cursor — ADR 0018), so a reconnect replays lines from the last
+/// lifecycle event; anything at or before this mark was already shown.
+type StageLogClock = HashMap<String, chrono::DateTime<chrono::Utc>>;
+
 enum StreamOutcome {
     /// The pipeline reached a terminal state; carries the deploy result.
     Terminal(Result<()>),
@@ -99,6 +104,7 @@ pub(crate) async fn watch_deploy_pipeline(
     // progress gives up.
     const MAX_RECONNECTS: u32 = 10;
     let mut buffers: StageLogBuffer = HashMap::new();
+    let mut log_clock: StageLogClock = HashMap::new();
     let mut last_event_id: Option<i64> = None;
     let mut failures: u32 = 0;
 
@@ -112,6 +118,7 @@ pub(crate) async fn watch_deploy_pipeline(
             pipeline_run_id,
             resume_from,
             &mut buffers,
+            &mut log_clock,
             &mut last_event_id,
         )
         .await?
@@ -153,6 +160,7 @@ pub(crate) async fn watch_deploy_pipeline(
 /// `last_event_id`, until either the pipeline reaches a terminal state
 /// (`Terminal`) or the connection drops (`Disconnected`). A non-success HTTP
 /// status (gone, unauthorized) is a hard error, not a reconnectable drop.
+#[allow(clippy::too_many_arguments)]
 async fn stream_once(
     printer: &Printer,
     client: &reqwest::Client,
@@ -161,6 +169,7 @@ async fn stream_once(
     pipeline_run_id: i64,
     since: Option<i64>,
     buffers: &mut StageLogBuffer,
+    log_clock: &mut StageLogClock,
     last_event_id: &mut Option<i64>,
 ) -> Result<StreamOutcome> {
     let mut request = client
@@ -198,7 +207,9 @@ async fn stream_once(
         while let Some(end) = buf.find("\n\n") {
             let raw_event = buf[..end].to_string();
             buf.drain(..end + 2);
-            if let Some(outcome) = handle_sse_event(printer, buffers, last_event_id, &raw_event)? {
+            if let Some(outcome) =
+                handle_sse_event(printer, buffers, log_clock, last_event_id, &raw_event)?
+            {
                 return Ok(StreamOutcome::Terminal(outcome));
             }
         }
@@ -209,6 +220,7 @@ async fn stream_once(
 fn handle_sse_event(
     printer: &Printer,
     buffers: &mut StageLogBuffer,
+    log_clock: &mut StageLogClock,
     last_event_id: &mut Option<i64>,
     raw: &str,
 ) -> Result<Option<Result<()>>> {
@@ -268,6 +280,9 @@ fn handle_sse_event(
             let created_at = delta.created_at.as_deref();
             match delta.event.kind.as_str() {
                 "log" => {
+                    if replayed_log(log_clock, &stage, delta.created_at.as_deref()) {
+                        return Ok(None);
+                    }
                     let text = delta.event.detail.as_deref().unwrap_or("");
                     let is_info = delta.event.level == "info";
                     if is_info {
@@ -343,6 +358,24 @@ fn handle_sse_event(
         _ => {}
     }
     Ok(None)
+}
+
+/// True when a log delta is a reconnect replay: at or before the newest line
+/// already shown for its stage. Advances the clock otherwise.
+fn replayed_log(log_clock: &mut StageLogClock, stage: &str, created_at: Option<&str>) -> bool {
+    let Some(timestamp) = created_at
+        .and_then(|raw| chrono::DateTime::parse_from_rfc3339(raw).ok())
+        .map(|parsed| parsed.with_timezone(&chrono::Utc))
+    else {
+        return false;
+    };
+    match log_clock.get(stage) {
+        Some(newest) if timestamp <= *newest => true,
+        _ => {
+            log_clock.insert(stage.to_string(), timestamp);
+            false
+        }
+    }
 }
 
 /// Print the buffered Debug log for a failed stage, with `--- log ---`
