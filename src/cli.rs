@@ -93,6 +93,16 @@ pub(crate) enum Command {
         #[arg(long, hide = true)]
         target: Option<String>,
     },
+    /// Print platform documentation as raw markdown, fetched from
+    /// docs.gbandit.com so it always reflects the current deploy contract.
+    Docs {
+        /// Page to print (e.g. "deploy", "auth", "heartbeat"). Omit to
+        /// print the llms.txt index of available pages.
+        page: Option<String>,
+        /// Print the entire documentation in one output (llms-full.txt).
+        #[arg(long)]
+        full: bool,
+    },
     Logout,
 }
 

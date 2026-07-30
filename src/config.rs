@@ -50,10 +50,12 @@ impl ProjectConfig {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LocalDevConfig {
-    /// When true (default), `deploy` auto-commits a dirty tree and pushes to
-    /// the linked remote so every deploy is a synced checkpoint. False: the
+    /// When true, `deploy` auto-commits a dirty tree and pushes to the linked
+    /// remote so every deploy is a synced checkpoint. False (default): the
     /// CLI never touches git — no commits, no push; you sync the remote
-    /// yourself.
+    /// yourself. The default is false so deploying a pre-existing repo never
+    /// commits or pushes to someone's real remote unasked; the template opts
+    /// in explicitly.
     #[serde(default = "default_auto_commit")]
     auto_commit: bool,
 }
@@ -67,12 +69,16 @@ impl Default for LocalDevConfig {
 }
 
 fn default_auto_commit() -> bool {
-    true
+    false
 }
 
 /// Env vars are dev overrides (set by the gbandit-dev alias); defaults point at prod.
 pub(crate) fn auth_origin() -> String {
     std::env::var("GBANDIT_AUTH_ORIGIN").unwrap_or_else(|_| "https://auth.gbandit.com".into())
+}
+
+pub(crate) fn docs_origin() -> String {
+    std::env::var("GBANDIT_DOCS_ORIGIN").unwrap_or_else(|_| "https://docs.gbandit.com".into())
 }
 
 pub(crate) fn platform_api_origin() -> String {
@@ -112,5 +118,9 @@ fn read_gbandit_json() -> Result<ProjectConfig> {
     let path = PathBuf::from("gbandit.json");
     let bytes = fs::read(&path)
         .with_context(|| "no --project flag and no gbandit.json found in the current directory")?;
-    serde_json::from_slice(&bytes).context("failed to parse gbandit.json")
+    serde_json::from_slice(&bytes).context(
+        "failed to parse gbandit.json (unknown fields are rejected) \
+         — schema: https://docs.gbandit.com/deploy#gbandit-json \
+         (or run: gbandit docs deploy)",
+    )
 }

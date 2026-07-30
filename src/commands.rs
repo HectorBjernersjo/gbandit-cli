@@ -110,8 +110,45 @@ pub(crate) async fn run(command: Command, printer: &Printer) -> Result<()> {
             title,
             target,
         } => scaffold_command::run(printer, name, title, target).await,
+        Command::Docs { page, full } => docs(page.as_deref(), full).await,
         Command::Logout => auth_session::logout(printer).await,
     }
+}
+
+/// Fetch-and-print, never bundled: the deploy contract is a server-side fact
+/// and a stale binary must not document an old one.
+async fn docs(page: Option<&str>, full: bool) -> Result<()> {
+    let origin = crate::config::docs_origin();
+    let url = if full {
+        format!("{origin}/llms-full.txt")
+    } else {
+        match page {
+            Some(page) => {
+                let page = page.trim_start_matches('/').trim_end_matches(".md");
+                let page = page.split(['#', '?']).next().unwrap_or(page);
+                format!("{origin}/{page}.md")
+            }
+            None => format!("{origin}/llms.txt"),
+        }
+    };
+    let response = crate::http::http_client()
+        .get(&url)
+        .send()
+        .await
+        .with_context(|| {
+            format!("failed to fetch {url} — check your network; the docs live at {origin}")
+        })?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        bail!("no docs page at {url} — run `gbandit docs` to list available pages");
+    }
+    let text = response
+        .error_for_status()
+        .with_context(|| format!("failed to fetch {url}"))?
+        .text()
+        .await
+        .with_context(|| format!("failed to read response body from {url}"))?;
+    print!("{text}");
+    Ok(())
 }
 
 async fn logs(
