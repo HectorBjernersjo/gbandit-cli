@@ -2,7 +2,7 @@
 //!
 //! Backs `gbandit scaffold` for both humans (interactive) and the Pi Agent
 //! entrypoint (non-interactive, via --target). Owning the
-//! clone+substitute+gbandit.json+initial-commit flow in one place lets the
+//! clone+substitute+gbandit.jsonc+initial-commit flow in one place lets the
 //! agent image stop shelling out to git/sed for the same job.
 
 use std::fs;
@@ -22,7 +22,7 @@ pub(crate) struct ScaffoldOptions<'a> {
     /// Agent pod sets this so the workspace PVC starts with a single
     /// linear-history commit owned entirely by this project.
     pub(crate) init_git: bool,
-    /// Written as `title` in gbandit.json when present, opting the project
+    /// Written as `title` in gbandit.jsonc when present, opting the project
     /// into deploy-managed titles. Agent scaffolds pass None so a deploy
     /// can't clobber a title set in the web UI.
     pub(crate) title: Option<&'a str>,
@@ -77,7 +77,7 @@ pub(crate) fn scaffold_project(printer: &Printer, opts: ScaffoldOptions<'_>) -> 
     let slug_underscored = opts.slug.replace('-', "_");
     substitute_placeholders(opts.target, opts.slug, &slug_underscored)?;
 
-    write_gbandit_json(opts.target, opts.slug, opts.title)?;
+    write_gbandit_jsonc(opts.target, opts.slug, opts.title)?;
 
     if opts.init_git {
         printer.progress("Initialising git repo with initial commit...");
@@ -107,7 +107,7 @@ fn is_valid_slug(slug: &str) -> bool {
 }
 
 /// "space-shooter" → "Space Shooter". The default platform title when
-/// gbandit.json doesn't manage one.
+/// gbandit.jsonc doesn't manage one.
 pub(crate) fn title_from_slug(slug: &str) -> String {
     slug.split('-')
         .filter(|part| !part.is_empty())
@@ -233,20 +233,57 @@ fn looks_like_text(bytes: &[u8]) -> bool {
     !head.contains(&0)
 }
 
-fn write_gbandit_json(target: &Path, slug: &str, title: Option<&str>) -> Result<()> {
-    let path = target.join("gbandit.json");
-    let mut body = serde_json::json!({
+fn write_gbandit_jsonc(target: &Path, slug: &str, title: Option<&str>) -> Result<()> {
+    // The template may still carry a stale gbandit.json — the platform
+    // rejects deploys when it shadows gbandit.jsonc's role, so drop it.
+    let _ = fs::remove_file(target.join("gbandit.json"));
+
+    let path = target.join("gbandit.jsonc");
+    let mut config = serde_json::json!({
         "project": slug,
-        "database": "none",
+        "frontend": { "dockerfile": "frontend/Dockerfile", "context": "frontend" },
+        "backend": { "dockerfile": "backend/Dockerfile", "context": "backend" },
         "local_dev": { "auto_commit": true },
     });
     if let Some(title) = title {
-        body["title"] = serde_json::Value::String(title.to_string());
+        config["title"] = serde_json::Value::String(title.to_string());
     }
-    let pretty = serde_json::to_string_pretty(&body)?;
-    fs::write(&path, format!("{pretty}\n"))
-        .with_context(|| format!("failed to write {}", path.display()))?;
+    let body = serde_json::to_string_pretty(&config)? + "\n";
+    fs::write(&path, body).with_context(|| format!("failed to write {}", path.display()))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::write_gbandit_jsonc;
+
+    #[test]
+    fn scaffolded_config_declares_both_components() {
+        let dir = tempfile::tempdir().unwrap();
+        write_gbandit_jsonc(dir.path(), "space-shooter", Some("Space Shooter")).unwrap();
+        let written = std::fs::read_to_string(dir.path().join("gbandit.jsonc")).unwrap();
+        let config: serde_json::Value = serde_json::from_str(&written).unwrap();
+        assert_eq!(config["project"], "space-shooter");
+        assert_eq!(config["title"], "Space Shooter");
+        for component in ["frontend", "backend"] {
+            assert_eq!(
+                config[component]["dockerfile"],
+                format!("{component}/Dockerfile")
+            );
+            assert_eq!(config[component]["context"], component);
+        }
+        assert_eq!(config["local_dev"]["auto_commit"], true);
+    }
+
+    #[test]
+    fn scaffolded_config_omits_absent_title() {
+        let dir = tempfile::tempdir().unwrap();
+        write_gbandit_jsonc(dir.path(), "p", None).unwrap();
+        let written = std::fs::read_to_string(dir.path().join("gbandit.jsonc")).unwrap();
+        let config: serde_json::Value = serde_json::from_str(&written).unwrap();
+        assert_eq!(config["project"], "p");
+        assert!(config.get("title").is_none());
+    }
 }
 
 fn run_git(args: &[&str]) -> Result<()> {

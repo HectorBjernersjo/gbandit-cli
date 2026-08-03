@@ -1,17 +1,42 @@
 use std::fs;
 use std::io::{IsTerminal, Write};
-use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use reqwest::multipart::{Form, Part};
 
-use crate::config::{DatabaseEngine, ProjectConfig};
+use crate::config::ProjectConfig;
 use crate::deploy_archive::{build_component_archive, build_migrate_down_archive};
 use crate::git;
+use crate::http::ApiError;
 use crate::pipeline_watch::watch_deploy_pipeline;
 use crate::platform_client::{PlatformClient, SourceUploadPipeline};
 use crate::printer::Printer;
 use crate::scaffold::title_from_slug;
+
+/// Everything the deploy command chose at the CLI layer, built once and
+/// threaded through the workflow as a unit.
+pub(crate) struct DeployArgs {
+    pub(crate) environment: String,
+    pub(crate) message: Option<String>,
+    pub(crate) overwrite: bool,
+    pub(crate) baseline: bool,
+    pub(crate) create: bool,
+    pub(crate) confirm_database_removal: bool,
+    pub(crate) detach: bool,
+    pub(crate) json: bool,
+}
+
+/// The expensive one-time work of a deploy, computed before the first upload
+/// attempt. The confirmation retry re-uploads this as-is — the config cannot
+/// change between the two attempts.
+struct PreparedDeploy {
+    client: PlatformClient,
+    archive_bytes: Vec<u8>,
+    commit_sha: Option<String>,
+    deploy_message: Option<String>,
+    has_origin: String,
+    known_commits: Option<String>,
+}
 
 pub(crate) struct DeployWorkflow<'a> {
     printer: &'a Printer,
@@ -22,92 +47,64 @@ impl<'a> DeployWorkflow<'a> {
         Self { printer }
     }
 
-    pub(crate) async fn deploy(
-        &self,
-        environment: &str,
-        config: &ProjectConfig,
-        message: Option<&str>,
-        overwrite: bool,
-        baseline: bool,
-        create: bool,
-        detach: bool,
-        json: bool,
-    ) -> Result<()> {
-        let (client, upload) = self
-            .start_deploy(environment, config, message, overwrite, baseline, create, json)
-            .await?;
-
-        let Some(upload) = upload else {
-            if json {
-                println!("{}", serde_json::json!({ "status": "baseline_skipped" }));
-            } else {
-                self.printer.progress(
-                    "Baseline deploy skipped — the project already has a succeeded deploy.",
-                );
-            }
-            return Ok(());
-        };
-
-        if json {
-            println!("{}", serde_json::to_string(&upload)?);
-        } else if detach {
-            self.printer.progress(format!(
-                "Started deploy {environment} for project {} as Pipeline Run #{}.",
-                config.project, upload.pipeline_run_id
-            ));
+    pub(crate) async fn deploy(&self, config: &ProjectConfig, args: &DeployArgs) -> Result<()> {
+        let result = self.deploy_inner(config, args).await;
+        if args.json && let Err(err) = &result {
+            println!("{}", json_error_payload(err));
         }
-
-        if detach {
-            return Ok(());
-        }
-
-        self.printer.progress(format!(
-            "Deploying {environment} for project {}...",
-            config.project
-        ));
-        watch_deploy_pipeline(
-            self.printer,
-            client.http(),
-            client.origin(),
-            client.token(),
-            upload.pipeline_run_id,
-        )
-        .await
+        result
     }
 
-    async fn start_deploy(
-        &self,
-        environment: &str,
-        config: &ProjectConfig,
-        message: Option<&str>,
-        overwrite: bool,
-        baseline: bool,
-        create: bool,
-        json: bool,
-    ) -> Result<(PlatformClient, Option<SourceUploadPipeline>)> {
-        if overwrite {
+    async fn deploy_inner(&self, config: &ProjectConfig, args: &DeployArgs) -> Result<()> {
+        let prepared = self.prepare(config, args).await?;
+
+        let mut result = self
+            .deploy_attempt(&prepared, config, args, args.confirm_database_removal)
+            .await;
+
+        // Reactive confirmation: the platform rejects a deploy that drops the
+        // `database` field (409 database_removal_requires_confirmation). In an
+        // interactive session, confirm and retry instead of making the user
+        // rediscover the --confirm-database-removal flag. The retry re-uploads
+        // the already-built archive — no second checkpoint or push.
+        if !args.confirm_database_removal
+            && !args.json
+            && std::io::stdin().is_terminal()
+            && let Err(err) = &result
+            && let Some(api) = err.downcast_ref::<ApiError>()
+            && api.has_code("database_removal_requires_confirmation")
+        {
+            self.printer.progress(&api.error);
+            confirm_database_removal_prompt(&config.project)?;
+            result = self.deploy_attempt(&prepared, config, args, true).await;
+        }
+
+        result
+    }
+
+    /// One-time work: project existence/title sync, checkpoint commit, push
+    /// gate, and archive build. Never repeated by the confirmation retry.
+    async fn prepare(&self, config: &ProjectConfig, args: &DeployArgs) -> Result<PreparedDeploy> {
+        if args.overwrite {
             self.printer.progress(
                 "Overwriting deploy lineage if necessary. Use this only after an intentional git history rewrite.",
             );
         }
 
-        let project = &config.project;
-
-        if config.database == DatabaseEngine::None && has_up_migrations() {
-            bail!(
-                "you have migrations in backend/migrations but database=none in gbandit.json; set database to sqlite or postgres"
-            );
-        }
-
         // Ensure the platform project exists (and its title matches
-        // gbandit.json) before any local side effects like the checkpoint
+        // gbandit.jsonc) before any local side effects like the checkpoint
         // auto-commit — answering "n" to the create prompt must leave the
         // working tree untouched.
         let client = PlatformClient::from_saved_auth().await?;
-        self.ensure_project(&client, config, create, json).await?;
+        self.ensure_project(&client, config, args.create, args.json)
+            .await?;
 
-        let (commit_sha, deploy_message) =
-            prepare_checkpoint(self.printer, config.auto_commit(), environment, message)?;
+        let (commit_sha, deploy_message) = prepare_checkpoint(
+            self.printer,
+            config.auto_commit(),
+            &args.environment,
+            args.message.as_deref(),
+        )?;
 
         // Push gate (ADR 0005): if `origin` is configured, push must succeed
         // before the Pipeline Run is triggered. Dirty local-dev deploys have no
@@ -126,7 +123,6 @@ impl<'a> DeployWorkflow<'a> {
         }
 
         let timing = std::env::var("GBANDIT_TIMING").is_ok();
-
         let archive_started = std::time::Instant::now();
         let archive = build_component_archive("project")?;
         if timing {
@@ -136,34 +132,107 @@ impl<'a> DeployWorkflow<'a> {
             );
         }
         let archive_bytes = fs::read(archive.path())?;
-        let submission_id = uuid::Uuid::new_v4().to_string();
         let has_origin = git::has_origin()?.to_string();
         let known_commits = git::known_commits()?.map(|commits| commits.join("\n"));
 
+        Ok(PreparedDeploy {
+            client,
+            archive_bytes,
+            commit_sha,
+            deploy_message,
+            has_origin,
+            known_commits,
+        })
+    }
+
+    async fn deploy_attempt(
+        &self,
+        prepared: &PreparedDeploy,
+        config: &ProjectConfig,
+        args: &DeployArgs,
+        confirm_database_removal: bool,
+    ) -> Result<()> {
+        let upload = self
+            .upload(prepared, config, args, confirm_database_removal)
+            .await?;
+
+        let Some(upload) = upload else {
+            if args.json {
+                println!("{}", serde_json::json!({ "status": "baseline_skipped" }));
+            } else {
+                self.printer.progress(
+                    "Baseline deploy skipped — the project already has a succeeded deploy.",
+                );
+            }
+            return Ok(());
+        };
+
+        if args.json {
+            println!("{}", serde_json::to_string(&upload)?);
+        } else if args.detach {
+            self.printer.progress(format!(
+                "Started deploy {} for project {} as Pipeline Run #{}.",
+                args.environment, config.project, upload.pipeline_run_id
+            ));
+        }
+
+        if args.detach {
+            return Ok(());
+        }
+
+        self.printer.progress(format!(
+            "Deploying {} for project {}...",
+            args.environment, config.project
+        ));
+        watch_deploy_pipeline(
+            self.printer,
+            prepared.client.http(),
+            prepared.client.origin(),
+            prepared.client.token(),
+            upload.pipeline_run_id,
+        )
+        .await
+    }
+
+    async fn upload(
+        &self,
+        prepared: &PreparedDeploy,
+        config: &ProjectConfig,
+        args: &DeployArgs,
+        confirm_database_removal: bool,
+    ) -> Result<Option<SourceUploadPipeline>> {
+        // Fresh per attempt: the platform dedupes on submission_id, so the
+        // confirmed retry must not reuse the rejected attempt's id.
+        let submission_id = uuid::Uuid::new_v4().to_string();
+        let timing = std::env::var("GBANDIT_TIMING").is_ok();
         let upload_started = std::time::Instant::now();
-        let upload = client
-            .upload_project_source(project, environment, || {
+        let upload = prepared
+            .client
+            .upload_project_source(&config.project, &args.environment, || {
                 let mut form = Form::new()
                     .text("submission_id", submission_id.clone())
-                    .text("has_origin", has_origin.clone());
-                if let Some(sha) = commit_sha.as_deref() {
+                    .text("has_origin", prepared.has_origin.clone());
+                if let Some(sha) = prepared.commit_sha.as_deref() {
                     form = form.text("commit_sha", sha.to_string());
                 }
-                if let Some(msg) = deploy_message.as_deref() {
+                if let Some(msg) = prepared.deploy_message.as_deref() {
                     form = form.text("deploy_message", msg.to_string());
                 }
-                if let Some(commits) = known_commits.as_deref() {
+                if let Some(commits) = prepared.known_commits.as_deref() {
                     form = form.text("known_commits", commits.to_string());
                 }
-                if overwrite {
+                if args.overwrite {
                     form = form.text("overwrite", "true");
                 }
-                if baseline {
+                if args.baseline {
                     form = form.text("baseline", "true");
+                }
+                if confirm_database_removal {
+                    form = form.text("confirm_database_removal", "true");
                 }
                 Ok(form.part(
                     "bundle",
-                    Part::bytes(archive_bytes.clone())
+                    Part::bytes(prepared.archive_bytes.clone())
                         .file_name("project.tar.zst".to_string())
                         .mime_str("application/zstd")?,
                 ))
@@ -175,10 +244,10 @@ impl<'a> DeployWorkflow<'a> {
                 upload_started.elapsed().as_millis()
             );
         }
-        Ok((client, upload))
+        Ok(upload)
     }
 
-    /// Create-on-deploy (with confirmation) plus title sync: gbandit.json is
+    /// Create-on-deploy (with confirmation) plus title sync: gbandit.jsonc is
     /// the source of truth for the title whenever it carries one.
     async fn ensure_project(
         &self,
@@ -220,7 +289,7 @@ impl<'a> DeployWorkflow<'a> {
     }
 }
 
-/// Typo guard: a misspelled `project` in gbandit.json must not silently
+/// Typo guard: a misspelled `project` in gbandit.jsonc must not silently
 /// become a fresh project. `--create` is the non-interactive opt-in.
 fn confirm_create(slug: &str, json: bool) -> Result<bool> {
     if json || !std::io::stdin().is_terminal() {
@@ -240,18 +309,26 @@ fn confirm_create(slug: &str, json: bool) -> Result<bool> {
     ))
 }
 
-/// True when `backend/migrations` holds at least one `*.up.sql` file — the
-/// signal that the project expects a database (ADR 0014 §1.4).
-fn has_up_migrations() -> bool {
-    let Ok(entries) = fs::read_dir("backend/migrations") else {
-        return false;
+/// Type-the-slug friction, mirroring `project delete`: removing a database
+/// is destructive and must not happen off a reflexive "y".
+fn confirm_database_removal_prompt(project: &str) -> Result<()> {
+    crate::printer::confirm_typed(
+        "Type the project name to confirm removing the database: ",
+        project,
+        "aborted: typed value did not match the project name",
+    )
+}
+
+/// `--json` failure line for stdout: the platform's structured error payload
+/// ({error, code?, issues?}) plus status, matching the success-line shape.
+fn json_error_payload(err: &anyhow::Error) -> String {
+    let mut payload = match err.downcast_ref::<ApiError>() {
+        Some(api) => serde_json::to_value(api)
+            .unwrap_or_else(|_| serde_json::json!({ "error": api.error })),
+        None => serde_json::json!({ "error": format!("{err:#}") }),
     };
-    entries.flatten().any(|entry| {
-        entry
-            .file_name()
-            .to_str()
-            .is_some_and(|name| name.ends_with(".up.sql"))
-    })
+    payload["status"] = serde_json::Value::String("error".to_string());
+    payload.to_string()
 }
 
 pub(crate) async fn migrate_down_to(
@@ -262,11 +339,6 @@ pub(crate) async fn migrate_down_to(
 ) -> Result<()> {
     if target < 0 {
         bail!("target migration version must be >= 0");
-    }
-    if !PathBuf::from("backend/migrations").is_dir() {
-        bail!(
-            "no backend/migrations/ directory in current workspace — `gbandit migrate down-to` must run from the project root with the migrations dir present"
-        );
     }
 
     printer.progress("Minting access token...");
@@ -359,7 +431,7 @@ fn prepare_checkpoint(
         }
         bail!(
             "deploy checkpoints require a git repository and this directory is not one — \
-             run `git init`, or set local_dev.auto_commit to false in gbandit.json \
+             run `git init`, or set local_dev.auto_commit to false in gbandit.jsonc \
              to deploy without checkpoints"
         );
     }

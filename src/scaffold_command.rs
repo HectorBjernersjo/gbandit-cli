@@ -46,7 +46,7 @@ pub(crate) async fn run(
         );
     }
 
-    // `title` in gbandit.json is opt-in for deploy-managed titles: it is
+    // `title` in gbandit.jsonc is opt-in for deploy-managed titles: it is
     // written only when the user provided or confirmed one. Non-interactive
     // scaffolds (the Pi Agent entrypoint) omit it so a later deploy can't
     // clobber a title set in the web UI.

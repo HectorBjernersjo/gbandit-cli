@@ -1,8 +1,9 @@
 use anyhow::{Context, Result, bail};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Reqwest client preconfigured with `Gbandit-Client` so backends can
-/// route per-version behaviour (e.g. archive format support).
+/// route per-version behaviour (e.g. archive format support) and
+/// `X-Gbandit-Cli-Version` so the platform can reject outdated CLIs (426).
 pub(crate) fn http_client() -> reqwest::Client {
     let mut headers = reqwest::header::HeaderMap::new();
     let value = format!("gbandit-cli/{}", crate::BUILD_VERSION);
@@ -11,6 +12,10 @@ pub(crate) fn http_client() -> reqwest::Client {
     headers.insert(
         reqwest::header::HeaderName::from_static("gbandit-client"),
         header,
+    );
+    headers.insert(
+        reqwest::header::HeaderName::from_static("x-gbandit-cli-version"),
+        reqwest::header::HeaderValue::from_static(env!("CARGO_PKG_VERSION")),
     );
     headers.insert(
         reqwest::header::USER_AGENT,
@@ -22,10 +27,53 @@ pub(crate) fn http_client() -> reqwest::Client {
         .expect("reqwest client must build with static headers")
 }
 
-#[derive(Debug, Deserialize)]
-struct ErrorResponse {
-    error: String,
+/// Platform error body: `error` is always a human-readable message; `code`
+/// and `issues` are present for machine-actionable failures (e.g.
+/// `invalid_config`, `database_removal_requires_confirmation`). Lenient by
+/// design — the server owns the schema.
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct ApiError {
+    pub(crate) error: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) code: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) issues: Vec<ApiErrorIssue>,
 }
+
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct ApiErrorIssue {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) docs_url: Option<String>,
+}
+
+impl ApiError {
+    pub(crate) fn has_code(&self, code: &str) -> bool {
+        self.code.as_deref() == Some(code)
+    }
+}
+
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.error)?;
+        for issue in &self.issues {
+            f.write_str("\n  - ")?;
+            if let Some(path) = issue.path.as_deref() {
+                write!(f, "{path}: ")?;
+            }
+            f.write_str(issue.message.as_deref().unwrap_or("invalid"))?;
+            if let Some(docs) = issue.docs_url.as_deref() {
+                write!(f, " (see {docs})")?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for ApiError {}
 
 pub(crate) async fn parse_json<T: for<'de> Deserialize<'de>>(
     response: reqwest::Response,
@@ -47,17 +95,22 @@ pub(crate) async fn parse_json<T: for<'de> Deserialize<'de>>(
     bail!(parse_error(response).await)
 }
 
-pub(crate) async fn parse_error(response: reqwest::Response) -> String {
+pub(crate) async fn parse_error(response: reqwest::Response) -> ApiError {
     let status = response.status();
-    let message = match response.json::<ErrorResponse>().await {
-        Ok(payload) => payload.error,
-        Err(_) => format!("request failed with status {status}"),
+    let mut parsed = match response.json::<ApiError>().await {
+        Ok(payload) => payload,
+        Err(_) => ApiError {
+            error: format!("request failed with status {status}"),
+            code: None,
+            issues: Vec::new(),
+        },
     };
     if status == reqwest::StatusCode::UNAUTHORIZED {
-        format!("{message} — run `gbandit login` to re-authenticate")
-    } else {
-        message
+        parsed.error = format!("{} — run `gbandit login` to re-authenticate", parsed.error);
+    } else if parsed.has_code("cli_outdated") {
+        parsed.error = format!("{} — run `gbandit update`", parsed.error);
     }
+    parsed
 }
 
 fn body_snippet(bytes: &[u8]) -> String {

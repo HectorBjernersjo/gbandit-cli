@@ -51,6 +51,11 @@ pub(crate) enum Command {
         /// not exist yet.
         #[arg(long)]
         create: bool,
+        /// Confirm removing the project's database when this deploy drops
+        /// the `database` field from gbandit.jsonc. Without it the platform
+        /// rejects such a deploy; interactive runs are prompted instead.
+        #[arg(long)]
+        confirm_database_removal: bool,
         /// Return after creating the Pipeline Run instead of waiting for completion.
         #[arg(long)]
         detach: bool,
@@ -84,7 +89,7 @@ pub(crate) enum Command {
         /// Project slug + directory name. Use "." for in-place scaffolding.
         /// Prompted if omitted.
         name: Option<String>,
-        /// Display title, stored as `title` in gbandit.json — deploy keeps
+        /// Display title, stored as `title` in gbandit.jsonc — deploy keeps
         /// the platform title in sync with that field. Prompted if omitted.
         #[arg(long)]
         title: Option<String>,

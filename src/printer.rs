@@ -1,4 +1,23 @@
+use std::io::Write;
+
+use anyhow::{Context, Result, bail};
 use chrono::Local;
+
+/// Type-the-exact-value friction for destructive actions: print `prompt`,
+/// read a line, and bail with `mismatch_error` unless the trimmed input
+/// matches `expected` verbatim.
+pub(crate) fn confirm_typed(prompt: &str, expected: &str, mismatch_error: &str) -> Result<()> {
+    print!("{prompt}");
+    std::io::stdout().flush().ok();
+    let mut typed = String::new();
+    std::io::stdin()
+        .read_line(&mut typed)
+        .context("failed to read confirmation")?;
+    if typed.trim() != expected {
+        bail!("{mismatch_error}");
+    }
+    Ok(())
+}
 
 #[derive(Clone, Copy)]
 pub(crate) struct Printer {

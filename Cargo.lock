@@ -419,7 +419,7 @@ dependencies = [
 
 [[package]]
 name = "gbandit"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -427,6 +427,7 @@ dependencies = [
  "dirs",
  "flate2",
  "ignore",
+ "jsonc-parser",
  "reqwest",
  "serde",
  "serde_json",
@@ -857,6 +858,15 @@ checksum = "b49715b7073f385ba4bc528e5747d02e66cb39c6146efb66b781f131f0fb399c"
 dependencies = [
  "once_cell",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "jsonc-parser"
+version = "0.26.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d6d80e6d70e7911a29f3cf3f44f452df85d06f73572b494ca99a2cad3fcf8f4"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]

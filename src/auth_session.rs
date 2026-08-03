@@ -177,7 +177,7 @@ pub(crate) async fn logout(printer: &Printer) -> Result<()> {
         .await
     {
         Ok(response) if response.status().is_success() => None,
-        Ok(response) => Some(parse_error(response).await),
+        Ok(response) => Some(parse_error(response).await.to_string()),
         Err(err) => Some(err.to_string()),
     };
 

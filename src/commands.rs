@@ -1,12 +1,11 @@
 use std::collections::BTreeMap;
-use std::io::Write;
 
 use anyhow::{Context, Result, bail};
 
 use crate::auth_session;
 use crate::cli::{Command, EnvAction, LogTarget, MigrateAction, ProjectAction};
 use crate::config::{load_project_config, resolve_project};
-use crate::deploy_workflow::{DeployWorkflow, migrate_down_to};
+use crate::deploy_workflow::{DeployArgs, DeployWorkflow, migrate_down_to};
 use crate::platform_client::{PlatformClient, ProjectDeleteOutcome};
 use crate::printer::Printer;
 use crate::query_table::QueryTable;
@@ -42,22 +41,22 @@ pub(crate) async fn run(command: Command, printer: &Printer) -> Result<()> {
             overwrite,
             baseline,
             create,
+            confirm_database_removal,
             detach,
             json,
         } => {
             let config = load_project_config(project)?;
-            DeployWorkflow::new(printer)
-                .deploy(
-                    environment.as_str(),
-                    &config,
-                    message.as_deref(),
-                    overwrite,
-                    baseline,
-                    create,
-                    detach,
-                    json,
-                )
-                .await
+            let args = DeployArgs {
+                environment: environment.as_str().to_string(),
+                message,
+                overwrite,
+                baseline,
+                create,
+                confirm_database_removal,
+                detach,
+                json,
+            };
+            DeployWorkflow::new(printer).deploy(&config, &args).await
         }
         Command::Logs {
             environment,
@@ -261,15 +260,11 @@ async fn project_delete(printer: &Printer, slug: &str, skip_prompt: bool) -> Res
         ));
         printer.progress("and prod databases, all deploys, all uploaded assets, and");
         printer.progress("the GitHub link. There is no undo and no Restore path.");
-        print!("Type the slug to confirm: ");
-        std::io::stdout().flush().ok();
-        let mut typed = String::new();
-        std::io::stdin()
-            .read_line(&mut typed)
-            .context("failed to read confirmation")?;
-        if typed.trim() != slug {
-            bail!("aborted: typed value did not match slug");
-        }
+        crate::printer::confirm_typed(
+            "Type the slug to confirm: ",
+            slug,
+            "aborted: typed value did not match slug",
+        )?;
     }
 
     let client = PlatformClient::from_saved_auth().await?;

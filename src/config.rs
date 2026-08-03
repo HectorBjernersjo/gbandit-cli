@@ -1,11 +1,14 @@
 use std::fs;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
+/// The fields of gbandit.jsonc the CLI itself consumes. The platform owns
+/// the config schema and validates it server-side, so unknown fields (and
+/// fields the CLI doesn't need, like `frontend`/`backend`/`database`) are
+/// deliberately ignored here.
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(crate) struct ProjectConfig {
     pub(crate) project: String,
     /// Display title. When present, deploy keeps the platform title in sync
@@ -14,26 +17,8 @@ pub(crate) struct ProjectConfig {
     /// a deploy can't clobber a title set in the web UI.
     #[serde(default)]
     pub(crate) title: Option<String>,
-    /// Tenant database engine for the whole project (ADR 0014). Immutable once
-    /// any env has provisioned a DB; supersedes ADR 0006's migration trigger.
-    #[serde(default)]
-    pub(crate) database: DatabaseEngine,
     #[serde(default)]
     local_dev: LocalDevConfig,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub(crate) enum DatabaseEngine {
-    None,
-    Postgres,
-    Sqlite,
-}
-
-impl Default for DatabaseEngine {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 impl ProjectConfig {
@@ -48,7 +33,6 @@ impl ProjectConfig {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct LocalDevConfig {
     /// When true, `deploy` auto-commits a dirty tree and pushes to the linked
     /// remote so every deploy is a synced checkpoint. False (default): the
@@ -90,15 +74,15 @@ pub(crate) fn resolve_project(cli_project: Option<String>) -> Result<String> {
     if let Some(project) = cli_project {
         return Ok(project);
     }
-    Ok(read_gbandit_json()?.project)
+    Ok(read_gbandit_jsonc()?.project)
 }
 
 /// Like `resolve_project` but returns the full config. When `--project`
-/// is passed without gbandit.json we synthesise defaults so deploys can
+/// is passed without gbandit.jsonc we synthesise defaults so deploys can
 /// run from outside a checked-in workspace.
 pub(crate) fn load_project_config(cli_project: Option<String>) -> Result<ProjectConfig> {
     match cli_project {
-        Some(project) => match read_gbandit_json() {
+        Some(project) => match read_gbandit_jsonc() {
             Ok(mut cfg) => {
                 cfg.project = project;
                 Ok(cfg)
@@ -106,21 +90,68 @@ pub(crate) fn load_project_config(cli_project: Option<String>) -> Result<Project
             Err(_) => Ok(ProjectConfig {
                 project,
                 title: None,
-                database: DatabaseEngine::default(),
                 local_dev: LocalDevConfig::default(),
             }),
         },
-        None => read_gbandit_json(),
+        None => read_gbandit_jsonc(),
     }
 }
 
-fn read_gbandit_json() -> Result<ProjectConfig> {
-    let path = PathBuf::from("gbandit.json");
-    let bytes = fs::read(&path)
-        .with_context(|| "no --project flag and no gbandit.json found in the current directory")?;
-    serde_json::from_slice(&bytes).context(
-        "failed to parse gbandit.json (unknown fields are rejected) \
-         — schema: https://docs.gbandit.com/deploy#gbandit-json \
+fn read_gbandit_jsonc() -> Result<ProjectConfig> {
+    let path = PathBuf::from("gbandit.jsonc");
+    if !path.is_file() {
+        if PathBuf::from("gbandit.json").is_file() {
+            bail!(
+                "found gbandit.json, but the config format moved to gbandit.jsonc — \
+                 rename gbandit.json to gbandit.jsonc and declare your components \
+                 (frontend/backend). See https://docs.gbandit.com/deploy#gbandit-jsonc"
+            );
+        }
+        bail!("no --project flag and no gbandit.jsonc found in the current directory");
+    }
+    let text = fs::read_to_string(&path).context("failed to read gbandit.jsonc")?;
+    parse_config(&text)
+}
+
+fn parse_config(text: &str) -> Result<ProjectConfig> {
+    let value = jsonc_parser::parse_to_serde_value(text, &Default::default())
+        .map_err(|err| anyhow::anyhow!("failed to parse gbandit.jsonc: {err}"))?
+        .context("gbandit.jsonc is empty")?;
+    serde_json::from_value(value).context(
+        "failed to read gbandit.jsonc \
+         — schema: https://docs.gbandit.com/deploy#gbandit-jsonc \
          (or run: gbandit docs deploy)",
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_config;
+
+    #[test]
+    fn parses_jsonc_and_ignores_server_owned_fields() {
+        let cfg = parse_config(
+            r#"{
+                // comment
+                "project": "my-game",
+                "title": "My Game",
+                "frontend": { "dockerfile": "frontend/Dockerfile", "context": "frontend" },
+                "backend": { "dockerfile": "backend/Dockerfile", "context": "backend" },
+                "database": { "engine": "sqlite", "migrations": "backend/migrations" },
+                "local_dev": { "auto_commit": true },
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.project, "my-game");
+        assert_eq!(cfg.title.as_deref(), Some("My Game"));
+        assert!(cfg.auto_commit());
+    }
+
+    #[test]
+    fn minimal_config_defaults_auto_commit_off() {
+        let cfg = parse_config(r#"{ "project": "p" }"#).unwrap();
+        assert_eq!(cfg.project, "p");
+        assert_eq!(cfg.title, None);
+        assert!(!cfg.local_dev.auto_commit);
+    }
 }
