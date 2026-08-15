@@ -298,7 +298,15 @@ fn handle_sse_event(
                 }
                 "started" | "succeeded" => {
                     if stage != "pipeline" {
-                        printer.status(&stage, created_at, delta.event.kind.as_str(), None);
+                        // Detail carries the stage's outcome summary when the
+                        // platform authored it (e.g. backend_migrate's
+                        // "applied 2 migration(s) (now at version 5)").
+                        printer.status(
+                            &stage,
+                            created_at,
+                            delta.event.kind.as_str(),
+                            delta.event.detail.as_deref(),
+                        );
                     }
                 }
                 "skipped" => {

@@ -70,6 +70,14 @@ pub(crate) fn platform_api_origin() -> String {
         .unwrap_or_else(|_| "https://platform.gbandit.com/api".into())
 }
 
+/// The platform web UI, derived from the API origin (same host minus `/api`).
+pub(crate) fn platform_web_origin() -> String {
+    let api = platform_api_origin();
+    api.strip_suffix("/api")
+        .map(str::to_string)
+        .unwrap_or(api)
+}
+
 pub(crate) fn resolve_project(cli_project: Option<String>) -> Result<String> {
     if let Some(project) = cli_project {
         return Ok(project);
@@ -100,13 +108,6 @@ pub(crate) fn load_project_config(cli_project: Option<String>) -> Result<Project
 fn read_gbandit_jsonc() -> Result<ProjectConfig> {
     let path = PathBuf::from("gbandit.jsonc");
     if !path.is_file() {
-        if PathBuf::from("gbandit.json").is_file() {
-            bail!(
-                "found gbandit.json, but the config format moved to gbandit.jsonc — \
-                 rename gbandit.json to gbandit.jsonc and declare your components \
-                 (frontend/backend). See https://docs.gbandit.com/deploy#gbandit-jsonc"
-            );
-        }
         bail!("no --project flag and no gbandit.jsonc found in the current directory");
     }
     let text = fs::read_to_string(&path).context("failed to read gbandit.jsonc")?;

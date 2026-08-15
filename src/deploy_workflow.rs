@@ -1,15 +1,15 @@
 use std::fs;
-use std::io::{IsTerminal, Write};
+use std::io::IsTerminal;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use reqwest::multipart::{Form, Part};
 
 use crate::config::ProjectConfig;
-use crate::deploy_archive::{build_component_archive, build_migrate_down_archive};
+use crate::deploy_archive::build_component_archive;
 use crate::git;
 use crate::http::ApiError;
 use crate::pipeline_watch::watch_deploy_pipeline;
-use crate::platform_client::{PlatformClient, SourceUploadPipeline};
+use crate::platform_client::{DeployPipeline, PlatformClient};
 use crate::printer::Printer;
 use crate::scaffold::title_from_slug;
 
@@ -56,11 +56,32 @@ impl<'a> DeployWorkflow<'a> {
     }
 
     async fn deploy_inner(&self, config: &ProjectConfig, args: &DeployArgs) -> Result<()> {
-        let prepared = self.prepare(config, args).await?;
+        self.ensure_credentials(args).await?;
+        let mut prepared = self.prepare(config, args).await?;
 
         let mut result = self
             .deploy_attempt(&prepared, config, args, args.confirm_database_removal)
             .await;
+
+        // Reactive Google sign-in: guests may only deploy frontends (403
+        // google_account_required). Interactively, offer the Google login —
+        // the auth server upgrades the guest in place so the project stays
+        // owned — mint fresh credentials, and retry the same archive.
+        if !args.json
+            && std::io::stdin().is_terminal()
+            && let Err(err) = &result
+            && let Some(api) = err.downcast_ref::<ApiError>()
+            && api.has_code("google_account_required")
+        {
+            self.printer.progress(&api.error);
+            if confirm_google_login()? {
+                crate::auth_session::login(self.printer).await?;
+                prepared.client = PlatformClient::from_saved_auth().await?;
+                result = self
+                    .deploy_attempt(&prepared, config, args, args.confirm_database_removal)
+                    .await;
+            }
+        }
 
         // Reactive confirmation: the platform rejects a deploy that drops the
         // `database` field (409 database_removal_requires_confirmation). In an
@@ -79,7 +100,43 @@ impl<'a> DeployWorkflow<'a> {
             result = self.deploy_attempt(&prepared, config, args, true).await;
         }
 
+        // A CLI-created guest has no browser cookie, so the platform would
+        // show them nothing — print a one-time signed-in link to their project
+        // after the first successful deploy.
+        if result.is_ok() && !args.json && !args.detach {
+            let redirect = format!(
+                "{}/projects/{}",
+                crate::config::platform_web_origin(),
+                config.project
+            );
+            if let Some(url) = crate::auth_session::first_deploy_handoff_link(&redirect).await {
+                self.printer.progress(format!(
+                    "View your project in the browser (one-time sign-in link, valid 10 minutes): {url}"
+                ));
+            }
+        }
+
         result
+    }
+
+    /// First-run guest intake: with no credentials at all, offer to create a
+    /// guest interactively. Non-interactive runs never create accounts — one
+    /// new owner per CI run is exactly the row growth we don't want.
+    async fn ensure_credentials(&self, args: &DeployArgs) -> Result<()> {
+        if crate::auth_session::has_credentials() {
+            return Ok(());
+        }
+        if args.json || !std::io::stdin().is_terminal() {
+            bail!(
+                "You are not logged in. Run `gbandit login` to sign in with Google, or `gbandit login --guest` to create a guest account."
+            );
+        }
+        if !crate::printer::confirm_yes("No account found. Continue as guest? [Y/n] ")? {
+            bail!(
+                "aborted: run `gbandit login` to sign in with Google, or `gbandit login --guest` for a guest account"
+            );
+        }
+        crate::auth_session::login_guest(self.printer).await
     }
 
     /// One-time work: project existence/title sync, checkpoint commit, push
@@ -171,7 +228,7 @@ impl<'a> DeployWorkflow<'a> {
             println!("{}", serde_json::to_string(&upload)?);
         } else if args.detach {
             self.printer.progress(format!(
-                "Started deploy {} for project {} as Pipeline Run #{}.",
+                "Started {} deployment for project {} (#{}).",
                 args.environment, config.project, upload.pipeline_run_id
             ));
         }
@@ -200,44 +257,51 @@ impl<'a> DeployWorkflow<'a> {
         config: &ProjectConfig,
         args: &DeployArgs,
         confirm_database_removal: bool,
-    ) -> Result<Option<SourceUploadPipeline>> {
+    ) -> Result<Option<DeployPipeline>> {
         // Fresh per attempt: the platform dedupes on submission_id, so the
         // confirmed retry must not reuse the rejected attempt's id.
         let submission_id = uuid::Uuid::new_v4().to_string();
         let timing = std::env::var("GBANDIT_TIMING").is_ok();
         let upload_started = std::time::Instant::now();
-        let upload = prepared
-            .client
-            .upload_project_source(&config.project, &args.environment, || {
-                let mut form = Form::new()
-                    .text("submission_id", submission_id.clone())
-                    .text("has_origin", prepared.has_origin.clone());
-                if let Some(sha) = prepared.commit_sha.as_deref() {
-                    form = form.text("commit_sha", sha.to_string());
-                }
-                if let Some(msg) = prepared.deploy_message.as_deref() {
-                    form = form.text("deploy_message", msg.to_string());
-                }
-                if let Some(commits) = prepared.known_commits.as_deref() {
-                    form = form.text("known_commits", commits.to_string());
-                }
-                if args.overwrite {
-                    form = form.text("overwrite", "true");
-                }
-                if args.baseline {
-                    form = form.text("baseline", "true");
-                }
-                if confirm_database_removal {
-                    form = form.text("confirm_database_removal", "true");
-                }
-                Ok(form.part(
-                    "bundle",
-                    Part::bytes(prepared.archive_bytes.clone())
-                        .file_name("project.tar.zst".to_string())
-                        .mime_str("application/zstd")?,
-                ))
-            })
-            .await?;
+        let make_form = || {
+            let mut form = Form::new()
+                .text("submission_id", submission_id.clone())
+                .text("has_origin", prepared.has_origin.clone());
+            if let Some(sha) = prepared.commit_sha.as_deref() {
+                form = form.text("commit_sha", sha.to_string());
+            }
+            if let Some(msg) = prepared.deploy_message.as_deref() {
+                form = form.text("deploy_message", msg.to_string());
+            }
+            if let Some(commits) = prepared.known_commits.as_deref() {
+                form = form.text("known_commits", commits.to_string());
+            }
+            if args.overwrite {
+                form = form.text("overwrite", "true");
+            }
+            if confirm_database_removal {
+                form = form.text("confirm_database_removal", "true");
+            }
+            Ok(form.part(
+                "bundle",
+                Part::bytes(prepared.archive_bytes.clone())
+                    .file_name("project.tar.zst".to_string())
+                    .mime_str("application/zstd")?,
+            ))
+        };
+        let upload = if args.baseline {
+            prepared
+                .client
+                .start_baseline_deploy(&config.project, &args.environment, make_form)
+                .await?
+        } else {
+            Some(
+                prepared
+                    .client
+                    .start_deploy(&config.project, &args.environment, make_form)
+                    .await?,
+            )
+        };
         if timing {
             eprintln!(
                 "@timing phase=upload ms={}",
@@ -289,6 +353,12 @@ impl<'a> DeployWorkflow<'a> {
     }
 }
 
+fn confirm_google_login() -> Result<bool> {
+    crate::printer::confirm_yes(
+        "Sign in with Google now? Your guest account and its projects are kept. [Y/n] ",
+    )
+}
+
 /// Typo guard: a misspelled `project` in gbandit.jsonc must not silently
 /// become a fresh project. `--create` is the non-interactive opt-in.
 fn confirm_create(slug: &str, json: bool) -> Result<bool> {
@@ -297,15 +367,8 @@ fn confirm_create(slug: &str, json: bool) -> Result<bool> {
             "project '{slug}' does not exist on the platform — pass --create to create it on deploy"
         );
     }
-    print!("Project '{slug}' does not exist on the platform. Create it? [Y/n] ");
-    std::io::stdout().flush().ok();
-    let mut line = String::new();
-    std::io::stdin()
-        .read_line(&mut line)
-        .context("failed to read confirmation")?;
-    Ok(matches!(
-        line.trim().to_ascii_lowercase().as_str(),
-        "" | "y" | "yes"
+    crate::printer::confirm_yes(&format!(
+        "Project '{slug}' does not exist on the platform. Create it? [Y/n] "
     ))
 }
 
@@ -341,40 +404,22 @@ pub(crate) async fn migrate_down_to(
         bail!("target migration version must be >= 0");
     }
 
-    printer.progress("Minting access token...");
     let client = PlatformClient::from_saved_auth().await?;
-    printer.progress("Creating migrations archive...");
-    let archive = build_migrate_down_archive()?;
-    let archive_bytes = fs::read(archive.path())?;
+    // The platform dedupes on submission_id, making the request retry-safe.
     let submission_id = uuid::Uuid::new_v4().to_string();
-
-    printer.progress("Uploading archive...");
-    let upload = client
-        .upload_migrate_down(project, || {
-            let mut form = Form::new()
-                .text("target_migration_version", target.to_string())
-                .text("submission_id", submission_id.clone());
-            if let Some(msg) = message {
-                form = form.text("deploy_message", msg.to_string());
-            }
-            Ok(form.part(
-                "bundle",
-                Part::bytes(archive_bytes.clone())
-                    .file_name("migrations.tar.zst".to_string())
-                    .mime_str("application/zstd")?,
-            ))
-        })
+    let pipeline = client
+        .start_migration(project, &submission_id, target, message)
         .await?;
 
     printer.progress(format!(
-        "Migrating dev tenant DB for project {project} down to version {target}..."
+        "Rolling the dev database for project {project} back to version {target}..."
     ));
     watch_deploy_pipeline(
         printer,
         client.http(),
         client.origin(),
         client.token(),
-        upload.pipeline_run_id,
+        pipeline.pipeline_run_id,
     )
     .await
 }
@@ -426,7 +471,7 @@ fn prepare_checkpoint(
 
     if !git::in_repo()? {
         if !auto_commit {
-            printer.progress("Skipping commit_sha: not a git repository.");
+            printer.progress("Skipping deploy checkpoint: not a git repository.");
             return Ok((None, deploy_message));
         }
         bail!(
@@ -440,7 +485,7 @@ fn prepare_checkpoint(
         Ok(value) => value,
         Err(err) => {
             if !auto_commit {
-                printer.progress(format!("Skipping commit_sha: {err}"));
+                printer.progress(format!("Skipping deploy checkpoint: {err}"));
                 return Ok((None, deploy_message));
             }
             return Err(err);

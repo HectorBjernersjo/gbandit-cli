@@ -77,7 +77,9 @@ pub(crate) fn scaffold_project(printer: &Printer, opts: ScaffoldOptions<'_>) -> 
     let slug_underscored = opts.slug.replace('-', "_");
     substitute_placeholders(opts.target, opts.slug, &slug_underscored)?;
 
-    write_gbandit_jsonc(opts.target, opts.slug, opts.title)?;
+    if let Some(title) = opts.title {
+        insert_title_into_gbandit_jsonc(opts.target, title)?;
+    }
 
     if opts.init_git {
         printer.progress("Initialising git repo with initial commit...");
@@ -233,56 +235,75 @@ fn looks_like_text(bytes: &[u8]) -> bool {
     !head.contains(&0)
 }
 
-fn write_gbandit_jsonc(target: &Path, slug: &str, title: Option<&str>) -> Result<()> {
-    // The template may still carry a stale gbandit.json — the platform
-    // rejects deploys when it shadows gbandit.jsonc's role, so drop it.
-    let _ = fs::remove_file(target.join("gbandit.json"));
-
+/// The template's gbandit.jsonc is the source of truth for the scaffolded
+/// config: placeholder substitution has already stamped the project slug into
+/// it, and its comments (the opt-in `backend`/`database` blocks) must
+/// survive, so it is never regenerated — the chosen title is spliced in
+/// after the `"project"` line instead.
+fn insert_title_into_gbandit_jsonc(target: &Path, title: &str) -> Result<()> {
     let path = target.join("gbandit.jsonc");
-    let mut config = serde_json::json!({
-        "project": slug,
-        "frontend": { "dockerfile": "frontend/Dockerfile", "context": "frontend" },
-        "backend": { "dockerfile": "backend/Dockerfile", "context": "backend" },
-        "local_dev": { "auto_commit": true },
-    });
-    if let Some(title) = title {
-        config["title"] = serde_json::Value::String(title.to_string());
+    let content = fs::read_to_string(&path)
+        .with_context(|| format!("template is missing {}", path.display()))?;
+
+    let mut out = String::with_capacity(content.len() + title.len() + 32);
+    let mut inserted = false;
+    for line in content.split_inclusive('\n') {
+        out.push_str(line);
+        if !inserted && line.trim_start().starts_with("\"project\"") {
+            if !line.ends_with('\n') {
+                out.push('\n');
+            }
+            let indent: String = line.chars().take_while(|c| c.is_whitespace()).collect();
+            let title_json = serde_json::Value::String(title.to_string());
+            out.push_str(&format!("{indent}\"title\": {title_json},\n"));
+            inserted = true;
+        }
     }
-    let body = serde_json::to_string_pretty(&config)? + "\n";
-    fs::write(&path, body).with_context(|| format!("failed to write {}", path.display()))?;
+    if !inserted {
+        bail!("template gbandit.jsonc has no \"project\" line to insert \"title\" after");
+    }
+    fs::write(&path, out).with_context(|| format!("failed to write {}", path.display()))?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::write_gbandit_jsonc;
+    use super::insert_title_into_gbandit_jsonc;
 
-    #[test]
-    fn scaffolded_config_declares_both_components() {
-        let dir = tempfile::tempdir().unwrap();
-        write_gbandit_jsonc(dir.path(), "space-shooter", Some("Space Shooter")).unwrap();
-        let written = std::fs::read_to_string(dir.path().join("gbandit.jsonc")).unwrap();
-        let config: serde_json::Value = serde_json::from_str(&written).unwrap();
-        assert_eq!(config["project"], "space-shooter");
-        assert_eq!(config["title"], "Space Shooter");
-        for component in ["frontend", "backend"] {
-            assert_eq!(
-                config[component]["dockerfile"],
-                format!("{component}/Dockerfile")
-            );
-            assert_eq!(config[component]["context"], component);
-        }
-        assert_eq!(config["local_dev"]["auto_commit"], true);
+    /// Mirrors the shipped template's gbandit.jsonc shape: slug already
+    /// substituted, backend/database opt-in blocks commented out.
+    const TEMPLATE_JSONC: &str = r#"{
+    "project": "space-shooter",
+    "frontend": {
+        "dockerfile": "frontend/Dockerfile", "context": "frontend"
+    },
+    // "backend": {
+    //     "dockerfile": "backend/Dockerfile", "context": "backend"
+    // },
+    "local_dev": {
+        "auto_commit": true
+    }
+}
+"#;
+
+    fn parse(text: &str) -> serde_json::Value {
+        jsonc_parser::parse_to_serde_value(text, &Default::default())
+            .unwrap()
+            .unwrap()
     }
 
     #[test]
-    fn scaffolded_config_omits_absent_title() {
+    fn title_is_inserted_and_comments_survive() {
         let dir = tempfile::tempdir().unwrap();
-        write_gbandit_jsonc(dir.path(), "p", None).unwrap();
+        std::fs::write(dir.path().join("gbandit.jsonc"), TEMPLATE_JSONC).unwrap();
+        insert_title_into_gbandit_jsonc(dir.path(), "Space \"Shooter\"").unwrap();
         let written = std::fs::read_to_string(dir.path().join("gbandit.jsonc")).unwrap();
-        let config: serde_json::Value = serde_json::from_str(&written).unwrap();
-        assert_eq!(config["project"], "p");
-        assert!(config.get("title").is_none());
+        let config = parse(&written);
+        assert_eq!(config["project"], "space-shooter");
+        assert_eq!(config["title"], "Space \"Shooter\"");
+        assert_eq!(config["frontend"]["context"], "frontend");
+        assert!(config.get("backend").is_none());
+        assert!(written.contains("// \"backend\""));
     }
 }
 

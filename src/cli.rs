@@ -15,7 +15,12 @@ pub(crate) struct Cli {
 
 #[derive(Subcommand)]
 pub(crate) enum Command {
-    Login,
+    Login {
+        /// Create a guest account without a browser. Scriptable; upgrade to
+        /// Google later with a plain `gbandit login`.
+        #[arg(long)]
+        guest: bool,
+    },
     Whoami,
     /// Update the gbandit CLI from GitHub releases.
     Update {
@@ -56,7 +61,7 @@ pub(crate) enum Command {
         /// rejects such a deploy; interactive runs are prompted instead.
         #[arg(long)]
         confirm_database_removal: bool,
-        /// Return after creating the Pipeline Run instead of waiting for completion.
+        /// Return after starting the deployment instead of waiting for completion.
         #[arg(long)]
         detach: bool,
         /// Emit stable machine-readable JSON on stdout.
@@ -125,11 +130,11 @@ pub(crate) enum ProjectAction {
 
 #[derive(Subcommand)]
 pub(crate) enum MigrateAction {
-    /// Roll the dev tenant DB to a specific migration version. Dev-only —
-    /// prod is forward-only by ADR 0002.
+    /// Roll the dev database back to a specific migration version.
+    /// Production migrations only move forward.
     DownTo {
-        /// Target migration version. Anything below the project's Migration
-        /// Floor (max version ever applied to prod) is rejected.
+        /// Target migration version. Versions older than one already applied
+        /// to production are rejected.
         target: i64,
         #[arg(long)]
         project: Option<String>,

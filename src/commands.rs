@@ -14,7 +14,13 @@ use crate::scaffold_command;
 
 pub(crate) async fn run(command: Command, printer: &Printer) -> Result<()> {
     match command {
-        Command::Login => auth_session::login(printer).await,
+        Command::Login { guest } => {
+            if guest {
+                auth_session::login_guest(printer).await
+            } else {
+                auth_session::login(printer).await
+            }
+        }
         Command::Whoami => auth_session::whoami(printer).await,
         Command::Update { tag } => {
             ReleaseInstaller::github()
@@ -256,10 +262,12 @@ async fn project_delete(printer: &Printer, slug: &str, skip_prompt: bool) -> Res
     if !skip_prompt {
         // Friction at the presentation layer (ADR 0004 §7).
         printer.progress(format!(
-            "About to permanently delete project '{slug}'. This destroys the dev"
+            "About to permanently delete project '{slug}', including its"
         ));
-        printer.progress("and prod databases, all deploys, all uploaded assets, and");
-        printer.progress("the GitHub link. There is no undo and no Restore path.");
+        printer.progress(
+            "deployments, databases, uploaded files, and Git remote connection.",
+        );
+        printer.progress("This cannot be undone.");
         crate::printer::confirm_typed(
             "Type the slug to confirm: ",
             slug,
@@ -274,8 +282,8 @@ async fn project_delete(printer: &Printer, slug: &str, skip_prompt: bool) -> Res
             // in the UI / list endpoint until the background reconciler frees
             // the slug.
             printer.progress(format!(
-                "Deletion started for project '{slug}'. The slug stays reserved \
-                 until namespace, database, and PVCs are fully torn down."
+                "Deletion started for project '{slug}'. The project name remains \
+                 unavailable until deletion is complete."
             ));
             Ok(())
         }

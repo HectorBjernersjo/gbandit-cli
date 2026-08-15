@@ -58,52 +58,107 @@ impl PlatformClient {
             .with_context(|| format!("query against project '{project}' ({environment}) failed"))
     }
 
-    /// `Ok(None)` = the server skipped a baseline deploy (200 instead of 202)
-    /// because the project already has a succeeded deploy.
-    pub(crate) async fn upload_project_source<F>(
+    pub(crate) async fn start_deploy<F>(
         &self,
         project: &str,
         environment: &str,
         make_form: F,
-    ) -> Result<Option<SourceUploadPipeline>>
+    ) -> Result<DeployPipeline>
     where
         F: Fn() -> Result<Form>,
     {
         let url = format!(
-            "{}/projects/{}/project/uploads?environment={}",
+            "{}/projects/{}/deploys?environment={}",
             self.origin, project, environment
         );
         let response = self
             .post_multipart_with_retry(&url, &make_form)
             .await
-            .context("failed to upload project source")?;
-        if response.status() == reqwest::StatusCode::OK {
-            return Ok(None);
-        }
-        Ok(Some(parse_json(response).await.with_context(|| {
-            format!("failed to start deploy for project '{project}' ({environment})")
-        })?))
+            .context("failed to send deploy request")?;
+        parse_json(response)
+            .await
+            .with_context(|| format!("failed to start deploy for project '{project}' ({environment})"))
     }
 
-    pub(crate) async fn upload_migrate_down<F>(
+    /// `Ok(None)` = the platform skipped the baseline deploy (200 instead of
+    /// 202) because the project already has a succeeded deploy.
+    pub(crate) async fn start_baseline_deploy<F>(
         &self,
         project: &str,
+        environment: &str,
         make_form: F,
-    ) -> Result<SourceUploadPipeline>
+    ) -> Result<Option<DeployPipeline>>
     where
         F: Fn() -> Result<Form>,
     {
         let url = format!(
-            "{}/projects/{}/backend/migrate-down?environment=dev",
-            self.origin, project
+            "{}/projects/{}/deploys/baseline?environment={}",
+            self.origin, project, environment
         );
         let response = self
             .post_multipart_with_retry(&url, &make_form)
             .await
-            .context("failed to upload migrate-down request")?;
+            .context("failed to send baseline deploy request")?;
+        if response.status() == reqwest::StatusCode::OK {
+            return Ok(None);
+        }
+        Ok(Some(parse_json(response).await.with_context(|| {
+            format!("failed to start baseline deploy for project '{project}' ({environment})")
+        })?))
+    }
+
+    /// No source bundle: the migrations are baked into the already-deployed
+    /// backend image, so the request only names the target version.
+    pub(crate) async fn start_migration(
+        &self,
+        project: &str,
+        submission_id: &str,
+        target_migration_version: i64,
+        deploy_message: Option<&str>,
+    ) -> Result<MigratePipeline> {
+        let url = format!(
+            "{}/projects/{}/migrations?environment=dev",
+            self.origin, project
+        );
+        let body = serde_json::json!({
+            "submission_id": submission_id,
+            "target_migration_version": target_migration_version,
+            "deploy_message": deploy_message,
+        });
+        let response = self
+            .post_json_with_retry(&url, &body)
+            .await
+            .context("failed to send migrate request")?;
         parse_json(response)
             .await
-            .with_context(|| format!("failed to start migrate-down for project '{project}'"))
+            .with_context(|| format!("failed to start migration for project '{project}'"))
+    }
+
+    /// Retries are safe for callers that dedupe server-side on a
+    /// submission_id carried in the body.
+    async fn post_json_with_retry(
+        &self,
+        url: &str,
+        body: &serde_json::Value,
+    ) -> Result<reqwest::Response> {
+        let mut last_transport_error = None;
+        for attempt in 0..3 {
+            let request = self.http.post(url).bearer_auth(&self.token).json(body);
+            match request.send().await {
+                Ok(response) if response.status().is_server_error() && attempt < 2 => {
+                    tokio::time::sleep(std::time::Duration::from_millis(250 * (attempt + 1))).await;
+                }
+                Ok(response) => return Ok(response),
+                Err(error) if attempt < 2 => {
+                    last_transport_error = Some(error);
+                    tokio::time::sleep(std::time::Duration::from_millis(250 * (attempt + 1))).await;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Err(last_transport_error
+            .expect("three retry attempts always retain a transport error")
+            .into())
     }
 
     async fn post_multipart_with_retry<F>(
@@ -327,7 +382,12 @@ pub(crate) struct QueryResponse {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-pub(crate) struct SourceUploadPipeline {
+pub(crate) struct DeployPipeline {
+    pub(crate) pipeline_run_id: i64,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct MigratePipeline {
     pub(crate) pipeline_run_id: i64,
 }
 

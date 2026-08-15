@@ -19,6 +19,9 @@ pub(crate) struct StoredCredentials {
     user_id: String,
     email: Option<String>,
     name: Option<String>,
+    /// The one-time "View your project" browser link has been printed.
+    #[serde(default)]
+    browser_handoff_shown: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -52,8 +55,16 @@ pub(crate) struct CliAuth {
 pub(crate) async fn login(printer: &Printer) -> Result<()> {
     let client = http_client();
     let auth_origin = auth_origin();
+    // If we're already logged in (typically as a guest), prove ownership of
+    // that session so the auth server upgrades it to Google in place instead
+    // of letting the browser complete the login as a guest again.
+    let previous = load_credentials().ok();
+    let upgrade_session_token = previous.as_ref().map(|c| c.session_token.clone());
     let response = client
         .post(format!("{auth_origin}/api/cli/login/start"))
+        .json(&serde_json::json!({
+            "upgrade_session_token": upgrade_session_token,
+        }))
         .send()
         .await
         .with_context(|| {
@@ -102,6 +113,7 @@ pub(crate) async fn login(printer: &Printer) -> Result<()> {
             user_id: completed.user_id,
             email: completed.email,
             name: completed.name,
+            browser_handoff_shown: false,
         };
         save_credentials(&credentials)?;
         printer.progress(format!(
@@ -112,6 +124,19 @@ pub(crate) async fn login(printer: &Printer) -> Result<()> {
                 .or(credentials.name.clone())
                 .unwrap_or(credentials.user_id.clone())
         ));
+        // The browser decides which account the login completes as, so it can
+        // differ from the one the CLI held — say so rather than leaving the
+        // switch to be discovered later.
+        if let Some(previous) = &previous
+            && previous.user_id != credentials.user_id
+        {
+            let was = previous
+                .email
+                .as_deref()
+                .or(previous.name.as_deref())
+                .unwrap_or(&previous.user_id);
+            printer.progress(format!("This replaces the previous login ({was})."));
+        }
         printer.progress(format!(
             "Session expires at {}",
             credentials.session_expires_at
@@ -120,6 +145,133 @@ pub(crate) async fn login(printer: &Printer) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+struct AnonymousLoginResponse {
+    user_id: String,
+    email: Option<String>,
+    name: Option<String>,
+    username: Option<String>,
+    expires_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct CliHandoffResponse {
+    url: String,
+}
+
+/// Explicit, browserless guest creation (`gbandit login --guest`). The
+/// server auto-generates the Username; the session cookie value doubles as
+/// the CLI session token.
+pub(crate) async fn login_guest(printer: &Printer) -> Result<()> {
+    if let Ok(existing) = load_credentials() {
+        let who = existing
+            .email
+            .as_deref()
+            .or(existing.name.as_deref())
+            .unwrap_or(&existing.user_id);
+        bail!(
+            "Already logged in as {who}. Run `gbandit logout` first if you really want a fresh guest account."
+        );
+    }
+
+    let client = http_client();
+    let auth_origin = auth_origin();
+    let response = client
+        .post(format!("{auth_origin}/api/anonymous"))
+        .send()
+        .await
+        .with_context(|| {
+            format!("could not reach the auth server at {auth_origin} — check your network connection")
+        })?;
+    let session_token = session_cookie_value(&response).context(
+        "auth server response did not include a session cookie — is the server up to date?",
+    )?;
+    let me: AnonymousLoginResponse = parse_json(response).await?;
+
+    let credentials = StoredCredentials {
+        auth_origin,
+        platform_api_origin: platform_api_origin(),
+        session_token,
+        session_expires_at: me.expires_at,
+        user_id: me.user_id,
+        email: me.email,
+        name: me.name,
+        browser_handoff_shown: false,
+    };
+    save_credentials(&credentials)?;
+    match me.username.as_deref() {
+        Some(username) => printer.progress(format!("Created guest account @{username}.")),
+        None => printer.progress("Created guest account."),
+    }
+    printer.progress(
+        "Upgrade to Google any time with `gbandit login` — your username and projects are kept.",
+    );
+    Ok(())
+}
+
+fn session_cookie_value(response: &reqwest::Response) -> Option<String> {
+    response
+        .headers()
+        .get_all(reqwest::header::SET_COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .find_map(|cookie| {
+            cookie
+                .strip_prefix("gbandit_session=")?
+                .split(';')
+                .next()
+                .filter(|token| !token.is_empty())
+                .map(str::to_string)
+        })
+}
+
+/// True when a deploy can authenticate without creating anything: env-provided
+/// tokens or a stored credentials file.
+pub(crate) fn has_credentials() -> bool {
+    if let Ok(token) = std::env::var("GBANDIT_ACCESS_TOKEN")
+        && !token.trim().is_empty()
+    {
+        return true;
+    }
+    load_credentials().is_ok()
+}
+
+/// One-time "View your project" link after the first successful deploy: mints
+/// a single-use browser handoff code so the CLI's user (typically a guest with
+/// no browser cookie) opens the platform already signed in. Best-effort — any
+/// failure just skips the link.
+pub(crate) async fn first_deploy_handoff_link(redirect: &str) -> Option<String> {
+    // Env-provided sessions (agent pods, e2e, CI) have no human at a browser.
+    if std::env::var("GBANDIT_ACCESS_TOKEN").is_ok()
+        || std::env::var("GBANDIT_SESSION_TOKEN").is_ok()
+    {
+        return None;
+    }
+    let mut credentials = load_credentials().ok()?;
+    if credentials.browser_handoff_shown {
+        return None;
+    }
+
+    let client = http_client();
+    let response = client
+        .post(format!("{}/api/cli/handoff", credentials.auth_origin))
+        .json(&serde_json::json!({
+            "session_token": credentials.session_token,
+            "redirect": redirect,
+        }))
+        .send()
+        .await
+        .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let handoff: CliHandoffResponse = response.json().await.ok()?;
+
+    credentials.browser_handoff_shown = true;
+    save_credentials(&credentials).ok();
+    Some(handoff.url)
 }
 
 pub(crate) async fn whoami(printer: &Printer) -> Result<()> {
@@ -280,6 +432,7 @@ fn load_credentials() -> Result<StoredCredentials> {
             user_id,
             email: None,
             name: None,
+            browser_handoff_shown: true,
         });
     }
 

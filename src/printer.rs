@@ -3,6 +3,20 @@ use std::io::Write;
 use anyhow::{Context, Result, bail};
 use chrono::Local;
 
+/// `[Y/n]` prompt on stdout; empty input counts as yes.
+pub(crate) fn confirm_yes(prompt: &str) -> Result<bool> {
+    print!("{prompt}");
+    std::io::stdout().flush().ok();
+    let mut line = String::new();
+    std::io::stdin()
+        .read_line(&mut line)
+        .context("failed to read confirmation")?;
+    Ok(matches!(
+        line.trim().to_ascii_lowercase().as_str(),
+        "" | "y" | "yes"
+    ))
+}
+
 /// Type-the-exact-value friction for destructive actions: print `prompt`,
 /// read a line, and bail with `mismatch_error` unless the trimmed input
 /// matches `expected` verbatim.
