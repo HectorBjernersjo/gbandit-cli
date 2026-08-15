@@ -2,7 +2,7 @@
 # gbandit CLI installer
 #
 # Usage:
-#   curl -fsSL https://github.com/HectorBjernersjo/gbandit-cli/releases/latest/download/install.sh | sh
+#   curl -fsSL https://github.com/gbandit/cli/releases/latest/download/install.sh | sh
 #
 # Env vars:
 #   GBANDIT_VERSION    Pin a specific tag (e.g. v0.2.0). Defaults to "latest".
@@ -10,7 +10,7 @@
 
 set -eu
 
-REPO="HectorBjernersjo/gbandit-cli"
+REPO="gbandit/cli"
 VERSION="${GBANDIT_VERSION:-latest}"
 INSTALL_DIR="${GBANDIT_INSTALL_DIR:-$HOME/.local/bin}"
 

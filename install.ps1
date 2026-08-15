@@ -1,7 +1,7 @@
 # gbandit CLI installer (Windows)
 #
 # Usage:
-#   irm https://github.com/HectorBjernersjo/gbandit-cli/releases/latest/download/install.ps1 | iex
+#   irm https://github.com/gbandit/cli/releases/latest/download/install.ps1 | iex
 #
 # Env vars:
 #   GBANDIT_VERSION     Pin a specific tag (e.g. v0.2.0). Defaults to "latest".
@@ -9,7 +9,7 @@
 
 $ErrorActionPreference = 'Stop'
 
-$repo = 'HectorBjernersjo/gbandit-cli'
+$repo = 'gbandit/cli'
 $version = if ($env:GBANDIT_VERSION) { $env:GBANDIT_VERSION } else { 'latest' }
 $installDir = if ($env:GBANDIT_INSTALL_DIR) {
     $env:GBANDIT_INSTALL_DIR

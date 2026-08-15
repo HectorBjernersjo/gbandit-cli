@@ -13,7 +13,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::printer::Printer;
 
-const DEFAULT_TEMPLATE_REPO: &str = "https://github.com/HectorBjernersjo/gbandit-game";
+const DEFAULT_TEMPLATE_REPO: &str = "https://github.com/gbandit/game-template";
 
 pub(crate) struct ScaffoldOptions<'a> {
     pub(crate) slug: &'a str,

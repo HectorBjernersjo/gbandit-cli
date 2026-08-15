@@ -10,7 +10,7 @@ use tempfile::tempdir;
 use crate::http::http_client;
 use crate::printer::Printer;
 
-const CLI_RELEASE_REPO: &str = "HectorBjernersjo/gbandit-cli";
+const CLI_RELEASE_REPO: &str = "gbandit/cli";
 
 pub(crate) struct ReleaseInstaller {
     client: reqwest::Client,
