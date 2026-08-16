@@ -194,7 +194,7 @@ impl PlatformClient {
     }
 
     /// Both sources come from the same store, so one call shape serves both
-    /// (kubernetes-infra: docs/plans/tenant_logs_via_loki.md).
+    /// (platform: docs/plans/tenant_logs_via_loki.md).
     pub(crate) async fn logs(
         &self,
         environment: &str,
