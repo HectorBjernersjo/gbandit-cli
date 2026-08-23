@@ -150,8 +150,8 @@ pub(crate) fn slugify(title: &str) -> String {
 }
 
 fn is_empty_dir(path: &Path) -> Result<bool> {
-    let mut iter = fs::read_dir(path)
-        .with_context(|| format!("failed to read dir {}", path.display()))?;
+    let mut iter =
+        fs::read_dir(path).with_context(|| format!("failed to read dir {}", path.display()))?;
     Ok(iter.next().is_none())
 }
 

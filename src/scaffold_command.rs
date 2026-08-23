@@ -32,7 +32,8 @@ pub(crate) async fn run(
     };
 
     if let Some(title) = &title {
-        validate_title_input(title.trim()).map_err(|msg| anyhow::anyhow!("invalid title: {msg}"))?;
+        validate_title_input(title.trim())
+            .map_err(|msg| anyhow::anyhow!("invalid title: {msg}"))?;
     }
 
     // Availability is advisory: nothing is reserved until the first deploy
@@ -291,7 +292,9 @@ fn validate_slug_input(value: &str) -> Result<(), String> {
     }
     for prefix in ["dev-", "stage-", "prod-"] {
         if value.starts_with(prefix) {
-            return Err(format!("slug may not start with reserved prefix '{prefix}'"));
+            return Err(format!(
+                "slug may not start with reserved prefix '{prefix}'"
+            ));
         }
     }
     Ok(())

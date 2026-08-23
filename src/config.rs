@@ -73,9 +73,7 @@ pub(crate) fn platform_api_origin() -> String {
 /// The platform web UI, derived from the API origin (same host minus `/api`).
 pub(crate) fn platform_web_origin() -> String {
     let api = platform_api_origin();
-    api.strip_suffix("/api")
-        .map(str::to_string)
-        .unwrap_or(api)
+    api.strip_suffix("/api").map(str::to_string).unwrap_or(api)
 }
 
 pub(crate) fn resolve_project(cli_project: Option<String>) -> Result<String> {

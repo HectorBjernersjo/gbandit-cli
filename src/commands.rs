@@ -264,9 +264,7 @@ async fn project_delete(printer: &Printer, slug: &str, skip_prompt: bool) -> Res
         printer.progress(format!(
             "About to permanently delete project '{slug}', including its"
         ));
-        printer.progress(
-            "deployments, databases, uploaded files, and Git remote connection.",
-        );
+        printer.progress("deployments, databases, uploaded files, and Git remote connection.");
         printer.progress("This cannot be undone.");
         crate::printer::confirm_typed(
             "Type the slug to confirm: ",

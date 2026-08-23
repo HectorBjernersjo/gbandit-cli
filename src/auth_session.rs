@@ -68,7 +68,9 @@ pub(crate) async fn login(printer: &Printer) -> Result<()> {
         .send()
         .await
         .with_context(|| {
-            format!("could not reach the auth server at {auth_origin} — check your network connection")
+            format!(
+                "could not reach the auth server at {auth_origin} — check your network connection"
+            )
         })?;
     let start: CliLoginStartResponse = parse_json(response).await?;
     let login_expires_at = chrono::DateTime::parse_from_rfc3339(&start.expires_at).ok();
@@ -84,7 +86,9 @@ pub(crate) async fn login(printer: &Printer) -> Result<()> {
         if let Some(expiry) = login_expires_at
             && chrono::Utc::now() >= expiry
         {
-            bail!("login request expired before it was approved in the browser — run `gbandit login` to start over");
+            bail!(
+                "login request expired before it was approved in the browser — run `gbandit login` to start over"
+            );
         }
 
         let response = client
@@ -183,7 +187,9 @@ pub(crate) async fn login_guest(printer: &Printer) -> Result<()> {
         .send()
         .await
         .with_context(|| {
-            format!("could not reach the auth server at {auth_origin} — check your network connection")
+            format!(
+                "could not reach the auth server at {auth_origin} — check your network connection"
+            )
         })?;
     let session_token = session_cookie_value(&response).context(
         "auth server response did not include a session cookie — is the server up to date?",

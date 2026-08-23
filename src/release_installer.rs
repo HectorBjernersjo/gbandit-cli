@@ -166,7 +166,11 @@ fn archive_extension() -> &'static str {
 }
 
 fn binary_file_name() -> &'static str {
-    if cfg!(windows) { "gbandit.exe" } else { "gbandit" }
+    if cfg!(windows) {
+        "gbandit.exe"
+    } else {
+        "gbandit"
+    }
 }
 
 fn extract_archive(bytes: &[u8], dest: &Path) -> Result<()> {
@@ -186,9 +190,8 @@ fn extract_archive(bytes: &[u8], dest: &Path) -> Result<()> {
                 continue;
             }
             if let Some(parent) = out_path.parent() {
-                fs::create_dir_all(parent).with_context(|| {
-                    format!("failed to create directory {}", parent.display())
-                })?;
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("failed to create directory {}", parent.display()))?;
             }
             let mut out = fs::File::create(&out_path)
                 .with_context(|| format!("failed to write {}", out_path.display()))?;
