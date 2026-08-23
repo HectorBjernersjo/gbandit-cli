@@ -43,13 +43,9 @@ pub(crate) enum Command {
         /// Becomes the git commit message and the checkpoint label.
         #[arg(short, long)]
         message: Option<String>,
-        /// Overwrite the latest deployed code lineage when this checkout does
-        /// not contain it. Use after intentional history rewrites.
-        #[arg(long)]
-        overwrite: bool,
         /// Agent warm build: deploys the fresh scaffold to warm the build
-        /// cache without claiming deploy lineage. Server-side it is skipped
-        /// entirely if the project already has a succeeded deploy.
+        /// cache. Server-side it is skipped entirely if the project already
+        /// has a succeeded deploy.
         #[arg(long, hide = true)]
         baseline: bool,
         /// Create the project on the platform without asking when it does

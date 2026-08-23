@@ -44,7 +44,6 @@ pub(crate) async fn run(command: Command, printer: &Printer) -> Result<()> {
             environment,
             project,
             message,
-            overwrite,
             baseline,
             create,
             confirm_database_removal,
@@ -55,7 +54,6 @@ pub(crate) async fn run(command: Command, printer: &Printer) -> Result<()> {
             let args = DeployArgs {
                 environment: environment.as_str().to_string(),
                 message,
-                overwrite,
                 baseline,
                 create,
                 confirm_database_removal,

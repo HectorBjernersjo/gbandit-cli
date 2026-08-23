@@ -18,7 +18,6 @@ use crate::scaffold::title_from_slug;
 pub(crate) struct DeployArgs {
     pub(crate) environment: String,
     pub(crate) message: Option<String>,
-    pub(crate) overwrite: bool,
     pub(crate) baseline: bool,
     pub(crate) create: bool,
     pub(crate) confirm_database_removal: bool,
@@ -34,8 +33,6 @@ struct PreparedDeploy {
     archive_bytes: Vec<u8>,
     commit_sha: Option<String>,
     deploy_message: Option<String>,
-    has_origin: String,
-    known_commits: Option<String>,
 }
 
 pub(crate) struct DeployWorkflow<'a> {
@@ -144,12 +141,6 @@ impl<'a> DeployWorkflow<'a> {
     /// One-time work: project existence/title sync, checkpoint commit, push
     /// gate, and archive build. Never repeated by the confirmation retry.
     async fn prepare(&self, config: &ProjectConfig, args: &DeployArgs) -> Result<PreparedDeploy> {
-        if args.overwrite {
-            self.printer.progress(
-                "Overwriting deploy lineage if necessary. Use this only after an intentional git history rewrite.",
-            );
-        }
-
         // Ensure the platform project exists (and its title matches
         // gbandit.jsonc) before any local side effects like the checkpoint
         // auto-commit — answering "n" to the create prompt must leave the
@@ -191,16 +182,12 @@ impl<'a> DeployWorkflow<'a> {
             );
         }
         let archive_bytes = fs::read(archive.path())?;
-        let has_origin = git::has_origin()?.to_string();
-        let known_commits = git::known_commits()?.map(|commits| commits.join("\n"));
 
         Ok(PreparedDeploy {
             client,
             archive_bytes,
             commit_sha,
             deploy_message,
-            has_origin,
-            known_commits,
         })
     }
 
@@ -266,20 +253,12 @@ impl<'a> DeployWorkflow<'a> {
         let timing = std::env::var("GBANDIT_TIMING").is_ok();
         let upload_started = std::time::Instant::now();
         let make_form = || {
-            let mut form = Form::new()
-                .text("submission_id", submission_id.clone())
-                .text("has_origin", prepared.has_origin.clone());
+            let mut form = Form::new().text("submission_id", submission_id.clone());
             if let Some(sha) = prepared.commit_sha.as_deref() {
                 form = form.text("commit_sha", sha.to_string());
             }
             if let Some(msg) = prepared.deploy_message.as_deref() {
                 form = form.text("deploy_message", msg.to_string());
-            }
-            if let Some(commits) = prepared.known_commits.as_deref() {
-                form = form.text("known_commits", commits.to_string());
-            }
-            if args.overwrite {
-                form = form.text("overwrite", "true");
             }
             if confirm_database_removal {
                 form = form.text("confirm_database_removal", "true");
