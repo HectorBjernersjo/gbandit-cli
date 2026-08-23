@@ -5,7 +5,7 @@ use anyhow::{Result, bail};
 use reqwest::multipart::{Form, Part};
 
 use crate::config::ProjectConfig;
-use crate::deploy_archive::{build_component_archive, build_migrate_down_archive};
+use crate::deploy_archive::build_component_archive;
 use crate::git;
 use crate::http::ApiError;
 use crate::pipeline_watch::watch_deploy_pipeline;
@@ -374,55 +374,6 @@ fn json_error_payload(err: &anyhow::Error) -> String {
     };
     payload["status"] = serde_json::Value::String("error".to_string());
     payload.to_string()
-}
-
-pub(crate) async fn migrate_down_to(
-    printer: &Printer,
-    project: &str,
-    target: i64,
-    message: Option<&str>,
-) -> Result<()> {
-    if target < 0 {
-        bail!("target migration version must be >= 0");
-    }
-
-    printer.progress("Minting access token...");
-    let client = PlatformClient::from_saved_auth().await?;
-    printer.progress("Creating migrations archive...");
-    let archive = build_migrate_down_archive()?;
-    let archive_bytes = fs::read(archive.path())?;
-    // The platform dedupes on submission_id, making the request retry-safe.
-    let submission_id = uuid::Uuid::new_v4().to_string();
-
-    printer.progress("Uploading archive...");
-    let pipeline = client
-        .upload_migrate_down(project, || {
-            let mut form = Form::new()
-                .text("target_migration_version", target.to_string())
-                .text("submission_id", submission_id.clone());
-            if let Some(msg) = message {
-                form = form.text("deploy_message", msg.to_string());
-            }
-            Ok(form.part(
-                "bundle",
-                Part::bytes(archive_bytes.clone())
-                    .file_name("migrations.tar.zst".to_string())
-                    .mime_str("application/zstd")?,
-            ))
-        })
-        .await?;
-
-    printer.progress(format!(
-        "Rolling the dev database for project {project} back to version {target}..."
-    ));
-    watch_deploy_pipeline(
-        printer,
-        client.http(),
-        client.origin(),
-        client.token(),
-        pipeline.pipeline_run_id,
-    )
-    .await
 }
 
 /// Push gate (ADR 0005). Aborts the deploy if push fails.
