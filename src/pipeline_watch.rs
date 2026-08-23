@@ -11,7 +11,6 @@ use crate::printer::Printer;
 enum PipelineStageKey {
     FrontendBuild,
     FrontendPublish,
-    BackendMigrate,
     BackendBuild,
     BackendDeploy,
 }
@@ -21,7 +20,6 @@ impl PipelineStageKey {
         match self {
             Self::FrontendBuild => "frontend_build",
             Self::FrontendPublish => "frontend_publish",
-            Self::BackendMigrate => "backend_migrate",
             Self::BackendBuild => "backend_build",
             Self::BackendDeploy => "backend_deploy",
         }
@@ -46,7 +44,6 @@ struct PipelineRun {
     error_summary: Option<String>,
     frontend_build: PipelineChildStatus,
     frontend_publish: PipelineChildStatus,
-    backend_migrate: PipelineChildStatus,
     backend_build: PipelineChildStatus,
     backend_deploy: PipelineChildStatus,
 }
@@ -298,9 +295,6 @@ fn handle_sse_event(
                 }
                 "started" | "succeeded" => {
                     if stage != "pipeline" {
-                        // Detail carries the stage's outcome summary when the
-                        // platform authored it (e.g. backend_migrate's
-                        // "applied 2 migration(s) (now at version 5)").
                         printer.status(
                             &stage,
                             created_at,
@@ -428,7 +422,6 @@ fn pipeline_stages(pipeline: &PipelineRun) -> Vec<(&'static str, &PipelineChildS
             let child = match stage {
                 PipelineStageKey::FrontendBuild => &pipeline.frontend_build,
                 PipelineStageKey::FrontendPublish => &pipeline.frontend_publish,
-                PipelineStageKey::BackendMigrate => &pipeline.backend_migrate,
                 PipelineStageKey::BackendBuild => &pipeline.backend_build,
                 PipelineStageKey::BackendDeploy => &pipeline.backend_deploy,
             };
