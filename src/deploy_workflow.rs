@@ -343,11 +343,14 @@ fn confirm_google_login() -> Result<bool> {
 fn confirm_create(slug: &str, json: bool) -> Result<bool> {
     if json || !std::io::stdin().is_terminal() {
         bail!(
-            "project '{slug}' does not exist on the platform — pass --create to create it on deploy"
+            "project '{slug}' does not exist on the platform (or you are not a member of it). \
+             If gbandit.jsonc's \"project\" was edited, change it back; pass --create to \
+             create '{slug}' on deploy"
         );
     }
     crate::printer::confirm_yes(&format!(
-        "Project '{slug}' does not exist on the platform. Create it? [Y/n] "
+        "Project '{slug}' does not exist on the platform (or you are not a member of it). \
+         If gbandit.jsonc's \"project\" was edited, answer no and change it back. Create it? [Y/n] "
     ))
 }
 

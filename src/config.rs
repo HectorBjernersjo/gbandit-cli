@@ -135,8 +135,7 @@ mod tests {
                 "project": "my-game",
                 "title": "My Game",
                 "frontend": { "dockerfile": "frontend/Dockerfile", "context": "frontend" },
-                "backend": { "dockerfile": "backend/Dockerfile", "context": "backend" },
-                "database": { "engine": "sqlite", "migrations": "backend/migrations" },
+                "backend": { "dockerfile": "backend/Dockerfile", "context": "backend", "volume": { "sqlite": true } },
                 "local_dev": { "auto_commit": true },
             }"#,
         )
