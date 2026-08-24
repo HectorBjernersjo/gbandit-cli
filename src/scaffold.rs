@@ -149,10 +149,18 @@ pub(crate) fn slugify(title: &str) -> String {
     out
 }
 
+/// `lost+found` doesn't count. Scaffolding into the root of a freshly
+/// formatted volume is the Pi Agent's normal first boot, and every ext4
+/// filesystem is born with that directory — the agent's own emptiness check in
+/// `apps/pi-agent/entrypoint.sh` skips it for the same reason.
 fn is_empty_dir(path: &Path) -> Result<bool> {
     let mut iter =
         fs::read_dir(path).with_context(|| format!("failed to read dir {}", path.display()))?;
-    Ok(iter.next().is_none())
+    Ok(!iter.any(|entry| {
+        entry
+            .map(|entry| entry.file_name() != "lost+found")
+            .unwrap_or(true)
+    }))
 }
 
 fn copy_dir_contents(src: &Path, dst: &Path) -> Result<()> {
