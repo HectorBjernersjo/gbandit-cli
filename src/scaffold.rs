@@ -245,7 +245,7 @@ fn looks_like_text(bytes: &[u8]) -> bool {
 
 /// The template's gbandit.jsonc is the source of truth for the scaffolded
 /// config: placeholder substitution has already stamped the project slug into
-/// it, and its comments (the opt-in `backend`/`database` blocks) must
+/// it, and its comments (the opt-in `backend`/`volume` blocks) must
 /// survive, so it is never regenerated — the chosen title is spliced in
 /// after the `"project"` line instead.
 fn insert_title_into_gbandit_jsonc(target: &Path, title: &str) -> Result<()> {

@@ -5,7 +5,7 @@ use anyhow::{Result, bail};
 use reqwest::multipart::{Form, Part};
 
 use crate::config::ProjectConfig;
-use crate::deploy_archive::build_component_archive;
+use crate::deploy_archive::build_project_archive;
 use crate::git;
 use crate::http::ApiError;
 use crate::pipeline_watch::watch_deploy_pipeline;
@@ -172,7 +172,7 @@ impl<'a> DeployWorkflow<'a> {
 
         let timing = std::env::var("GBANDIT_TIMING").is_ok();
         let archive_started = std::time::Instant::now();
-        let archive = build_component_archive("project")?;
+        let archive = build_project_archive()?;
         if timing {
             eprintln!(
                 "@timing phase=archive ms={}",

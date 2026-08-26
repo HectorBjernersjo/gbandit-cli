@@ -1,28 +1,19 @@
 use std::fs;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use ignore::WalkBuilder;
 use tar::Builder;
 use tempfile::NamedTempFile;
 
-pub(crate) fn build_component_archive(component: &str) -> Result<NamedTempFile> {
-    build_component_archive_in(component, Path::new("."))
+pub(crate) fn build_project_archive() -> Result<NamedTempFile> {
+    build_project_archive_in(Path::new("."))
 }
 
-fn build_component_archive_in(component: &str, base: &Path) -> Result<NamedTempFile> {
-    // For "project" the archive root is the cwd, with paths preserved
-    // as-is (frontend/..., backend/...). For component subtrees the
-    // archive must preserve the component's path so the executor's
-    // extraction lands files at the expected workspace location
-    // (e.g. backend/migrations/0001_init.up.sql).
-    let (root, archive_prefix) = match component {
-        "project" => (base.to_path_buf(), PathBuf::new()),
-        other => (base.join(other), PathBuf::from(other)),
-    };
+fn build_project_archive_in(root: &Path) -> Result<NamedTempFile> {
     if !root.is_dir() {
-        bail!("component directory not found: {}", root.display());
+        bail!("project directory not found: {}", root.display());
     }
 
     let temp = NamedTempFile::new().context("failed to create temporary archive")?;
@@ -40,7 +31,7 @@ fn build_component_archive_in(component: &str, base: &Path) -> Result<NamedTempF
     let config = root.join("gbandit.jsonc");
     if config.is_file() {
         let mut config_file = fs::File::open(&config)?;
-        tar.append_file(archive_prefix.join("gbandit.jsonc"), &mut config_file)?;
+        tar.append_file("gbandit.jsonc", &mut config_file)?;
     }
 
     // Rely on .gitignore (and .ignore) for skipping build outputs, dependency
@@ -48,7 +39,7 @@ fn build_component_archive_in(component: &str, base: &Path) -> Result<NamedTempF
     // — it can't be gitignored — so we hard-skip it. `hidden(false)` keeps
     // dotfiles like `.gitignore` and `.dockerignore` in the bundle since
     // they're meaningful project config.
-    let walker = WalkBuilder::new(&root)
+    let walker = WalkBuilder::new(root)
         .standard_filters(true)
         .hidden(false)
         .filter_entry(|entry| {
@@ -70,16 +61,15 @@ fn build_component_archive_in(component: &str, base: &Path) -> Result<NamedTempF
             continue;
         };
 
-        let relative = path
-            .strip_prefix(&root)
+        let archive_path = path
+            .strip_prefix(root)
             .with_context(|| format!("failed to strip archive root for {}", path.display()))?;
-        let archive_path = archive_prefix.join(relative);
 
         if file_type.is_dir() {
-            tar.append_dir(&archive_path, path)?;
+            tar.append_dir(archive_path, path)?;
         } else if file_type.is_file() {
             let mut file = fs::File::open(path)?;
-            tar.append_file(&archive_path, &mut file)?;
+            tar.append_file(archive_path, &mut file)?;
         }
     }
 
@@ -92,7 +82,7 @@ fn build_component_archive_in(component: &str, base: &Path) -> Result<NamedTempF
 
 #[cfg(test)]
 mod tests {
-    use super::build_component_archive_in;
+    use super::build_project_archive_in;
 
     fn archive_entries(archive: &tempfile::NamedTempFile) -> Vec<String> {
         let file = std::fs::File::open(archive.path()).unwrap();
@@ -118,7 +108,7 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("frontend")).unwrap();
         std::fs::write(dir.path().join("frontend/index.html"), "<html>").unwrap();
 
-        let archive = build_component_archive_in("project", dir.path()).unwrap();
+        let archive = build_project_archive_in(dir.path()).unwrap();
         let entries = archive_entries(&archive);
         assert_eq!(entries.first().map(String::as_str), Some("gbandit.jsonc"));
         assert_eq!(
