@@ -23,7 +23,7 @@ pub(crate) struct ProjectConfig {
 
 impl ProjectConfig {
     /// Local developer preference only. The Pi Agent runs without this config
-    /// and keeps the default auto-commit checkpoint behaviour.
+    /// and always auto-commits: agent-written code deserves a git history.
     pub(crate) fn auto_commit(&self) -> bool {
         if std::env::var("GBANDIT_AGENT").is_ok() {
             return true;
@@ -35,7 +35,7 @@ impl ProjectConfig {
 #[derive(Debug, Deserialize)]
 struct LocalDevConfig {
     /// When true, `deploy` auto-commits a dirty tree and pushes to the linked
-    /// remote so every deploy is a synced checkpoint. False (default): the
+    /// remote so every deploy is a pushed commit. False (default): the
     /// CLI never touches git — no commits, no push; you sync the remote
     /// yourself. The default is false so deploying a pre-existing repo never
     /// commits or pushes to someone's real remote unasked; the template opts

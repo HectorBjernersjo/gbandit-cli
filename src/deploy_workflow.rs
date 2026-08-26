@@ -86,7 +86,7 @@ impl<'a> DeployWorkflow<'a> {
         // `database` field (409 database_removal_requires_confirmation). In an
         // interactive session, confirm and retry instead of making the user
         // rediscover the --confirm-database-removal flag. The retry re-uploads
-        // the already-built archive — no second checkpoint or push.
+        // the already-built archive — no second commit or push.
         if !args.confirm_database_removal
             && !args.json
             && std::io::stdin().is_terminal()
@@ -138,18 +138,18 @@ impl<'a> DeployWorkflow<'a> {
         crate::auth_session::login_guest(self.printer).await
     }
 
-    /// One-time work: project existence/title sync, checkpoint commit, push
+    /// One-time work: project existence/title sync, auto-commit, push
     /// gate, and archive build. Never repeated by the confirmation retry.
     async fn prepare(&self, config: &ProjectConfig, args: &DeployArgs) -> Result<PreparedDeploy> {
         // Ensure the platform project exists (and its title matches
-        // gbandit.jsonc) before any local side effects like the checkpoint
+        // gbandit.jsonc) before any local side effects like the
         // auto-commit — answering "n" to the create prompt must leave the
         // working tree untouched.
         let client = PlatformClient::from_saved_auth().await?;
         self.ensure_project(&client, config, args.create, args.json)
             .await?;
 
-        let (commit_sha, deploy_message) = prepare_checkpoint(
+        let (commit_sha, deploy_message) = prepare_commit(
             self.printer,
             config.auto_commit(),
             &args.environment,
@@ -395,7 +395,7 @@ fn push_or_abort(printer: &Printer) -> Result<()> {
              Aborting deploy.\n\n{detail}"
         ),
         git::PushOutcome::Network { detail } => bail!(
-            "push failed — network unreachable. Aborting deploy so the Checkpoint stays in sync with the remote.\n\n{detail}"
+            "push failed — network unreachable. Aborting deploy so the deployed commit is on the remote.\n\n{detail}"
         ),
         git::PushOutcome::Auth { detail } => bail!(
             "push failed — authentication rejected. \
@@ -406,13 +406,14 @@ fn push_or_abort(printer: &Printer) -> Result<()> {
     }
 }
 
-/// Returns `(commit_sha, deploy_message)` for the platform.
+/// Returns `(commit_sha, deploy_message)` for the platform. The SHA is the
+/// deploy's label in the history, nothing decides anything from it, so it is
+/// only sent when HEAD is what gets uploaded:
 /// - auto_commit=true, dirty: commit then return HEAD.
 /// - auto_commit=true, clean: return HEAD (no empty commit).
-/// - auto_commit=false, dirty: `commit_sha = None` (deploy, not checkpoint).
-/// - auto_commit=false, clean: return HEAD (still lands as a checkpoint,
-///   but the deploy never pushes — restorable once the user pushes).
-fn prepare_checkpoint(
+/// - auto_commit=false, dirty: `commit_sha = None`.
+/// - auto_commit=false, clean: return HEAD; the deploy never pushes.
+fn prepare_commit(
     printer: &Printer,
     auto_commit: bool,
     environment: &str,
@@ -424,13 +425,13 @@ fn prepare_checkpoint(
 
     if !git::in_repo()? {
         if !auto_commit {
-            printer.progress("Skipping deploy checkpoint: not a git repository.");
+            printer.progress("Skipping auto-commit: not a git repository.");
             return Ok((None, deploy_message));
         }
         bail!(
-            "deploy checkpoints require a git repository and this directory is not one — \
+            "auto-commit requires a git repository and this directory is not one — \
              run `git init`, or set local_dev.auto_commit to false in gbandit.jsonc \
-             to deploy without checkpoints"
+             to deploy without committing"
         );
     }
 
@@ -438,7 +439,7 @@ fn prepare_checkpoint(
         Ok(value) => value,
         Err(err) => {
             if !auto_commit {
-                printer.progress(format!("Skipping deploy checkpoint: {err}"));
+                printer.progress(format!("Skipping auto-commit: {err}"));
                 return Ok((None, deploy_message));
             }
             return Err(err);

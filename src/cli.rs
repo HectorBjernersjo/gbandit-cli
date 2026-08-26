@@ -40,7 +40,7 @@ pub(crate) enum Command {
         environment: Environment,
         #[arg(long)]
         project: Option<String>,
-        /// Becomes the git commit message and the checkpoint label.
+        /// Becomes the git commit message and the deploy's label in the history.
         #[arg(short, long)]
         message: Option<String>,
         /// Agent warm build: deploys the fresh scaffold to warm the build
