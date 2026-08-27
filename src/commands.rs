@@ -3,9 +3,9 @@ use std::collections::BTreeMap;
 use anyhow::{Context, Result, bail};
 
 use crate::auth_session;
-use crate::cli::{Command, EnvAction, LogTarget, MigrateAction, ProjectAction};
+use crate::cli::{Command, EnvAction, LogTarget, ProjectAction};
 use crate::config::{load_project_config, resolve_project};
-use crate::deploy_workflow::{DeployArgs, DeployWorkflow, migrate_down_to};
+use crate::deploy_workflow::{DeployArgs, DeployWorkflow};
 use crate::platform_client::{PlatformClient, ProjectDeleteOutcome};
 use crate::printer::Printer;
 use crate::query_table::QueryTable;
@@ -93,16 +93,6 @@ pub(crate) async fn run(command: Command, printer: &Printer) -> Result<()> {
             } => {
                 let project = resolve_project(project)?;
                 env_delete(printer, environment.as_str(), &project, &key).await
-            }
-        },
-        Command::Migrate { action } => match action {
-            MigrateAction::DownTo {
-                target,
-                project,
-                message,
-            } => {
-                let project = resolve_project(project)?;
-                migrate_down_to(printer, &project, target, message.as_deref()).await
             }
         },
         Command::Project { action } => match action {

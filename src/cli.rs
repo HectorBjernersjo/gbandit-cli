@@ -40,7 +40,7 @@ pub(crate) enum Command {
         environment: Environment,
         #[arg(long)]
         project: Option<String>,
-        /// Becomes the git commit message and the checkpoint label.
+        /// Becomes the git commit message and the deploy's label in the history.
         #[arg(short, long)]
         message: Option<String>,
         /// Agent warm build: deploys the fresh scaffold to warm the build
@@ -74,10 +74,6 @@ pub(crate) enum Command {
     Env {
         #[command(subcommand)]
         action: EnvAction,
-    },
-    Migrate {
-        #[command(subcommand)]
-        action: MigrateAction,
     },
     Project {
         #[command(subcommand)]
@@ -121,21 +117,6 @@ pub(crate) enum ProjectAction {
         /// Skip the type-the-slug interactive confirm. Use only in scripts.
         #[arg(long)]
         yes: bool,
-    },
-}
-
-#[derive(Subcommand)]
-pub(crate) enum MigrateAction {
-    /// Roll the dev database back to a specific migration version.
-    /// Production migrations only move forward.
-    DownTo {
-        /// Target migration version. Versions older than one already applied
-        /// to production are rejected.
-        target: i64,
-        #[arg(long)]
-        project: Option<String>,
-        #[arg(short, long)]
-        message: Option<String>,
     },
 }
 

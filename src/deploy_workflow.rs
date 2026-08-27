@@ -5,7 +5,7 @@ use anyhow::{Result, bail};
 use reqwest::multipart::{Form, Part};
 
 use crate::config::ProjectConfig;
-use crate::deploy_archive::{build_component_archive, build_migrate_down_archive};
+use crate::deploy_archive::build_project_archive;
 use crate::git;
 use crate::http::ApiError;
 use crate::pipeline_watch::watch_deploy_pipeline;
@@ -86,7 +86,7 @@ impl<'a> DeployWorkflow<'a> {
         // `database` field (409 database_removal_requires_confirmation). In an
         // interactive session, confirm and retry instead of making the user
         // rediscover the --confirm-database-removal flag. The retry re-uploads
-        // the already-built archive — no second checkpoint or push.
+        // the already-built archive — no second commit or push.
         if !args.confirm_database_removal
             && !args.json
             && std::io::stdin().is_terminal()
@@ -138,18 +138,18 @@ impl<'a> DeployWorkflow<'a> {
         crate::auth_session::login_guest(self.printer).await
     }
 
-    /// One-time work: project existence/title sync, checkpoint commit, push
+    /// One-time work: project existence/title sync, auto-commit, push
     /// gate, and archive build. Never repeated by the confirmation retry.
     async fn prepare(&self, config: &ProjectConfig, args: &DeployArgs) -> Result<PreparedDeploy> {
         // Ensure the platform project exists (and its title matches
-        // gbandit.jsonc) before any local side effects like the checkpoint
+        // gbandit.jsonc) before any local side effects like the
         // auto-commit — answering "n" to the create prompt must leave the
         // working tree untouched.
         let client = PlatformClient::from_saved_auth().await?;
         self.ensure_project(&client, config, args.create, args.json)
             .await?;
 
-        let (commit_sha, deploy_message) = prepare_checkpoint(
+        let (commit_sha, deploy_message) = prepare_commit(
             self.printer,
             config.auto_commit(),
             &args.environment,
@@ -158,23 +158,21 @@ impl<'a> DeployWorkflow<'a> {
 
         // Push gate (ADR 0005): if `origin` is configured, push must succeed
         // before the Pipeline Run is triggered. Dirty local-dev deploys have no
-        // checkpoint commit, so there is nothing correct to push. With
-        // auto_commit=false the user syncs the linked remote themselves; the
-        // checkpoint becomes restorable once its commit reaches the remote
-        // (unreachable commits are filtered as orphans, PRD 0005).
+        // deploy commit, so there is nothing correct to push. With
+        // auto_commit=false the user syncs the linked remote themselves.
         if commit_sha.is_some() {
             if config.auto_commit() {
                 push_or_abort(self.printer)?;
             } else if git::has_origin()? {
                 self.printer.progress(
-                    "Skipping push to linked remote (auto_commit=false). The checkpoint becomes restorable once you push.",
+                    "Skipping push to linked remote (auto_commit=false). Push when you want this commit on the remote.",
                 );
             }
         }
 
         let timing = std::env::var("GBANDIT_TIMING").is_ok();
         let archive_started = std::time::Instant::now();
-        let archive = build_component_archive("project")?;
+        let archive = build_project_archive()?;
         if timing {
             eprintln!(
                 "@timing phase=archive ms={}",
@@ -345,11 +343,14 @@ fn confirm_google_login() -> Result<bool> {
 fn confirm_create(slug: &str, json: bool) -> Result<bool> {
     if json || !std::io::stdin().is_terminal() {
         bail!(
-            "project '{slug}' does not exist on the platform — pass --create to create it on deploy"
+            "project '{slug}' does not exist on the platform (or you are not a member of it). \
+             If gbandit.jsonc's \"project\" was edited, change it back; pass --create to \
+             create '{slug}' on deploy"
         );
     }
     crate::printer::confirm_yes(&format!(
-        "Project '{slug}' does not exist on the platform. Create it? [Y/n] "
+        "Project '{slug}' does not exist on the platform (or you are not a member of it). \
+         If gbandit.jsonc's \"project\" was edited, answer no and change it back. Create it? [Y/n] "
     ))
 }
 
@@ -376,55 +377,6 @@ fn json_error_payload(err: &anyhow::Error) -> String {
     payload.to_string()
 }
 
-pub(crate) async fn migrate_down_to(
-    printer: &Printer,
-    project: &str,
-    target: i64,
-    message: Option<&str>,
-) -> Result<()> {
-    if target < 0 {
-        bail!("target migration version must be >= 0");
-    }
-
-    printer.progress("Minting access token...");
-    let client = PlatformClient::from_saved_auth().await?;
-    printer.progress("Creating migrations archive...");
-    let archive = build_migrate_down_archive()?;
-    let archive_bytes = fs::read(archive.path())?;
-    // The platform dedupes on submission_id, making the request retry-safe.
-    let submission_id = uuid::Uuid::new_v4().to_string();
-
-    printer.progress("Uploading archive...");
-    let pipeline = client
-        .upload_migrate_down(project, || {
-            let mut form = Form::new()
-                .text("target_migration_version", target.to_string())
-                .text("submission_id", submission_id.clone());
-            if let Some(msg) = message {
-                form = form.text("deploy_message", msg.to_string());
-            }
-            Ok(form.part(
-                "bundle",
-                Part::bytes(archive_bytes.clone())
-                    .file_name("migrations.tar.zst".to_string())
-                    .mime_str("application/zstd")?,
-            ))
-        })
-        .await?;
-
-    printer.progress(format!(
-        "Rolling the dev database for project {project} back to version {target}..."
-    ));
-    watch_deploy_pipeline(
-        printer,
-        client.http(),
-        client.origin(),
-        client.token(),
-        pipeline.pipeline_run_id,
-    )
-    .await
-}
-
 /// Push gate (ADR 0005). Aborts the deploy if push fails.
 fn push_or_abort(printer: &Printer) -> Result<()> {
     if !git::has_origin()? {
@@ -443,7 +395,7 @@ fn push_or_abort(printer: &Printer) -> Result<()> {
              Aborting deploy.\n\n{detail}"
         ),
         git::PushOutcome::Network { detail } => bail!(
-            "push failed — network unreachable. Aborting deploy so the Checkpoint stays in sync with the remote.\n\n{detail}"
+            "push failed — network unreachable. Aborting deploy so the deployed commit is on the remote.\n\n{detail}"
         ),
         git::PushOutcome::Auth { detail } => bail!(
             "push failed — authentication rejected. \
@@ -454,13 +406,14 @@ fn push_or_abort(printer: &Printer) -> Result<()> {
     }
 }
 
-/// Returns `(commit_sha, deploy_message)` for the platform.
+/// Returns `(commit_sha, deploy_message)` for the platform. The SHA is the
+/// deploy's label in the history, nothing decides anything from it, so it is
+/// only sent when HEAD is what gets uploaded:
 /// - auto_commit=true, dirty: commit then return HEAD.
 /// - auto_commit=true, clean: return HEAD (no empty commit).
-/// - auto_commit=false, dirty: `commit_sha = None` (deploy, not checkpoint).
-/// - auto_commit=false, clean: return HEAD (still lands as a checkpoint,
-///   but the deploy never pushes — restorable once the user pushes).
-fn prepare_checkpoint(
+/// - auto_commit=false, dirty: `commit_sha = None`.
+/// - auto_commit=false, clean: return HEAD; the deploy never pushes.
+fn prepare_commit(
     printer: &Printer,
     auto_commit: bool,
     environment: &str,
@@ -472,13 +425,13 @@ fn prepare_checkpoint(
 
     if !git::in_repo()? {
         if !auto_commit {
-            printer.progress("Skipping deploy checkpoint: not a git repository.");
+            printer.progress("Skipping auto-commit: not a git repository.");
             return Ok((None, deploy_message));
         }
         bail!(
-            "deploy checkpoints require a git repository and this directory is not one — \
+            "auto-commit requires a git repository and this directory is not one — \
              run `git init`, or set local_dev.auto_commit to false in gbandit.jsonc \
-             to deploy without checkpoints"
+             to deploy without committing"
         );
     }
 
@@ -486,7 +439,7 @@ fn prepare_checkpoint(
         Ok(value) => value,
         Err(err) => {
             if !auto_commit {
-                printer.progress(format!("Skipping deploy checkpoint: {err}"));
+                printer.progress(format!("Skipping auto-commit: {err}"));
                 return Ok((None, deploy_message));
             }
             return Err(err);

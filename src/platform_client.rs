@@ -107,30 +107,6 @@ impl PlatformClient {
         })?))
     }
 
-    /// Uploads the workspace's migrations directory: the platform runs the
-    /// down migrations from these files, not from anything baked into the
-    /// deployed image.
-    pub(crate) async fn upload_migrate_down<F>(
-        &self,
-        project: &str,
-        make_form: F,
-    ) -> Result<MigratePipeline>
-    where
-        F: Fn() -> Result<Form>,
-    {
-        let url = format!(
-            "{}/projects/{}/backend/migrate-down?environment=dev",
-            self.origin, project
-        );
-        let response = self
-            .post_multipart_with_retry(&url, &make_form)
-            .await
-            .context("failed to send migrate request")?;
-        parse_json(response)
-            .await
-            .with_context(|| format!("failed to start migrate-down for project '{project}'"))
-    }
-
     async fn post_multipart_with_retry<F>(
         &self,
         url: &str,
@@ -353,11 +329,6 @@ pub(crate) struct QueryResponse {
 
 #[derive(Debug, Deserialize, Serialize)]
 pub(crate) struct DeployPipeline {
-    pub(crate) pipeline_run_id: i64,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct MigratePipeline {
     pub(crate) pipeline_run_id: i64,
 }
 
